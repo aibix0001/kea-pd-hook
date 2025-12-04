@@ -38,3 +38,9 @@ kea-dhcp6 -t kea-dhcp6.conf
 - libcurl4-openssl-dev (HTTP client library)
 - libjsoncpp-dev (JSON parsing library)
 - libboost-all-dev (Boost libraries required by Kea)
+
+## NetBox Integration
+- Supports NetBox REST API v3.x+
+- Creates devices and prefixes automatically
+- Requires NetBox API token with write permissions
+- Device naming: router-{duid_prefix} or router-{iaid}

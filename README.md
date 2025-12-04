@@ -11,6 +11,7 @@ This hook library integrates with Kea DHCPv6 to monitor prefix delegation assign
 - Monitors IA_PD (Prefix Delegation) assignments in Kea DHCPv6
 - Sends HTTP POST requests to configurable webhook endpoints
 - JSON payload format with assignment details
+- **NetBox API integration** for automatic prefix and device management
 - Configurable timeout and retry logic
 - Comprehensive logging through Kea's logging system
 
@@ -49,13 +50,37 @@ Add the hook to your `kea-dhcp6.conf`:
                 "parameters": {
                     "webhook-url": "https://your-api.example.com/dhcp6-events",
                     "timeout": 5000,
-                    "retry-count": 3
+                    "retry-count": 3,
+                    "netbox-enabled": true,
+                    "netbox-url": "https://netbox.example.com",
+                    "netbox-token": "your-netbox-api-token",
+                    "netbox-site": "Main Office",
+                    "netbox-device-role": "Router"
                 }
             }
         ]
     }
 }
 ```
+
+### NetBox Integration Parameters
+
+- **netbox-enabled**: Enable/disable NetBox API integration (boolean)
+- **netbox-url**: Base URL of your NetBox instance (string)
+- **netbox-token**: NetBox API authentication token (string)
+- **netbox-site**: Default site name for device creation (string)
+- **netbox-device-role**: Device role for router devices (string)
+
+### NetBox Data Model
+
+The hook will:
+1. **Create/find router devices** in NetBox based on client DUID or IAID
+2. **Create prefix objects** for delegated prefixes
+3. **Associate prefixes with devices** through interfaces
+
+Device naming convention:
+- If client DUID is available: `router-<first-8-chars-of-duid>`
+- If no DUID: `router-<iaid>`
 
 ## Testing
 
