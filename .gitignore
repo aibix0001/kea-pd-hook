@@ -1,0 +1,60 @@
+# Build artifacts
+*.so
+*.o
+*.a
+*.out
+*.exe
+
+# CMake build directories
+build/
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+
+# Compile commands
+compile_commands.json
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Debug files
+*.dSYM/
+*.su
+*.idb
+*.pdb
+
+# Dependency files
+*.d
+
+# Logs
+*.log
+
+# Temporary files
+*.tmp
+*.temp
+
+# Backup files
+*.bak
+*.backup
+
+# Package files
+*.deb
+*.rpm
+*.tar.gz
+*.zip
+
+# Test outputs
+test_results/
+coverage/
+
+# Configuration files with secrets
+*.conf
+*.config
+config.local.*
