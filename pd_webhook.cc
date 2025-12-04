@@ -185,6 +185,32 @@ findOrCreateDevice(const std::string& device_name) {
     return -1;
 }
 
+// Find existing prefix in NetBox
+static int
+findPrefix(const std::string& prefix, int prefix_length) {
+    std::string search_url = "ipam/prefixes/?prefix=" + prefix + "/" + std::to_string(prefix_length);
+    std::string response = netboxRequest("GET", search_url, "");
+    
+    if (response.empty()) {
+        return -1;
+    }
+    
+    // Check if prefix exists
+    if (response.find("\"count\":0") == std::string::npos) {
+        // Prefix exists, extract ID
+        size_t id_pos = response.find("\"id\":");
+        if (id_pos != std::string::npos) {
+            id_pos += 5;
+            size_t comma_pos = response.find(",", id_pos);
+            if (comma_pos != std::string::npos) {
+                return std::stoi(response.substr(id_pos, comma_pos - id_pos));
+            }
+        }
+    }
+    
+    return -1;
+}
+
 // Create prefix in NetBox
 static bool
 createPrefix(const std::string& prefix, int prefix_length, int device_id) {
@@ -198,6 +224,38 @@ createPrefix(const std::string& prefix, int prefix_length, int device_id) {
     // Check if prefix was created successfully
     if (response.find("\"id\":") != std::string::npos) {
         return true;
+    }
+    
+    return false;
+}
+
+// Assign prefix to device interface
+static bool
+assignPrefixToDevice(int prefix_id, int device_id) {
+    // First get device interfaces
+    std::string interfaces_url = "dcim/interfaces/?device_id=" + std::to_string(device_id);
+    std::string response = netboxRequest("GET", interfaces_url, "");
+    
+    if (response.empty()) {
+        return false;
+    }
+    
+    // Look for first interface (or create one if needed)
+    size_t id_pos = response.find("\"id\":");
+    if (id_pos != std::string::npos) {
+        id_pos += 5;
+        size_t comma_pos = response.find(",", id_pos);
+        if (comma_pos != std::string::npos) {
+            int interface_id = std::stoi(response.substr(id_pos, comma_pos - id_pos));
+            
+            // Create IP address assignment to interface
+            std::string ip_data = "{\"address\":\"" + std::to_string(prefix_id) + "\",\"assigned_object_type\":\"dcim.interface\",\"assigned_object_id\":" + std::to_string(interface_id) + ",\"status\":\"active\"}";
+            response = netboxRequest("POST", "ipam/ip-addresses/", ip_data);
+            
+            if (response.find("\"id\":") != std::string::npos) {
+                return true;
+            }
+        }
     }
     
     return false;
@@ -276,6 +334,9 @@ notifyPdAssigned(const Pkt6Ptr& query6,
             std::string prefix_str = l->addr_.toText();
             int prefix_len = static_cast<int>(l->prefixlen_);
             
+            // Check if prefix already exists in NetBox
+            int existing_prefix_id = findPrefix(prefix_str, prefix_len);
+            
             // Generate device name based on client DUID or IAID
             std::string device_name = "router-";
             OptionPtr clientid_opt = query6->getOption(D6O_CLIENTID);
@@ -290,8 +351,15 @@ notifyPdAssigned(const Pkt6Ptr& query6,
             // Find or create device
             int device_id = findOrCreateDevice(device_name);
             if (device_id > 0) {
-                // Create prefix in NetBox
-                createPrefix(prefix_str, prefix_len, device_id);
+                if (existing_prefix_id > 0) {
+                    // Prefix already exists, assign it to device
+                    assignPrefixToDevice(existing_prefix_id, device_id);
+                } else {
+                    // Create new prefix in NetBox
+                    if (createPrefix(prefix_str, prefix_len, device_id)) {
+                        // Prefix created successfully
+                    }
+                }
             }
         }
     }
