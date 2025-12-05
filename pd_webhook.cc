@@ -38,6 +38,7 @@ struct WebhookConfig {
     std::string url;
     long timeout_ms{2000};
     bool enabled{false};
+    bool debug{false};
     
     // NetBox API configuration
     std::string netbox_url;
@@ -46,6 +47,9 @@ struct WebhookConfig {
 };
 
 static WebhookConfig g_cfg;
+
+// Debug logging macro
+#define DEBUG_LOG(msg) do { if (g_cfg.debug) std::cout << msg << std::endl; } while(0)
 
 // Hex encode helper for DUID, etc.
 static std::string
@@ -251,11 +255,11 @@ createPrefix(const PdAssignmentData& data, uint32_t valid_lft, uint32_t preferre
 // Send request to NetBox API with check-then-create-or-update logic
 static void
 sendNetBoxRequest(const PdAssignmentData& data, uint32_t valid_lft, uint32_t preferred_lft) {
-    std::cout << "PD_WEBHOOK: sendNetBoxRequest called for prefix " << data.prefix << "/" << data.prefix_length 
-              << " (valid_lft=" << valid_lft << ", preferred_lft=" << preferred_lft << ")" << std::endl;
+    DEBUG_LOG("PD_WEBHOOK: sendNetBoxRequest called for prefix " << data.prefix << "/" << data.prefix_length 
+              << " (valid_lft=" << valid_lft << ", preferred_lft=" << preferred_lft << ")");
     
     if (!g_cfg.netbox_enabled || g_cfg.netbox_url.empty() || g_cfg.netbox_token.empty()) {
-        std::cout << "PD_WEBHOOK: NetBox not properly configured" << std::endl;
+        DEBUG_LOG("PD_WEBHOOK: NetBox not properly configured");
         return;
     }
 
@@ -285,26 +289,26 @@ extractClientDuid(const Pkt6Ptr& query) {
 // Extract CPE link-local address from DHCPv6 relay message peer-address
 static std::string
 extractCpeLinkLocal(const Pkt6Ptr& query) {
-    std::cout << "PD_WEBHOOK: >>> extractCpeLinkLocal() called" << std::endl;
+    DEBUG_LOG("PD_WEBHOOK: >>> extractCpeLinkLocal() called");
     std::string peer_address = "";
     
     // First, try to extract peer-address from relay-forward message
     if (query) {
-        std::cout << "PD_WEBHOOK: extractCpeLinkLocal - query is valid" << std::endl;
+        DEBUG_LOG("PD_WEBHOOK: extractCpeLinkLocal - query is valid");
         
         // Check if this packet itself is a relay message (RELAY-FORWARD or RELAY-REPLY)
         uint8_t msg_type = query->getType();
-        std::cout << "PD_WEBHOOK: Message type: " << static_cast<int>(msg_type) 
+        DEBUG_LOG("PD_WEBHOOK: Message type: " << static_cast<int>(msg_type) 
                   << " (REQUEST=" << static_cast<int>(DHCPV6_REQUEST) 
                   << ", RELAY_FORW=" << static_cast<int>(DHCPV6_RELAY_FORW) 
-                  << ", RELAY_REPL=" << static_cast<int>(DHCPV6_RELAY_REPL) << ")" << std::endl;
+                  << ", RELAY_REPL=" << static_cast<int>(DHCPV6_RELAY_REPL) << ")");
         
         // Check if Kea has stored relay information for this packet
         // Kea typically stores relay info in the packet's metadata
         try {
             // Check if the packet has relay information stored
             if (query->relay_info_.size() > 0) {
-                std::cout << "PD_WEBHOOK: Found " << query->relay_info_.size() << " relay info entries" << std::endl;
+                DEBUG_LOG("PD_WEBHOOK: Found " << query->relay_info_.size() << " relay info entries");
                 
                 // Try to access the correct fields in RelayInfo structure
                 const auto& relay = query->relay_info_[0];
@@ -314,26 +318,28 @@ extractCpeLinkLocal(const Pkt6Ptr& query) {
                     // Use direct field access - let's try the correct field names
                     // Based on Kea source, RelayInfo should have: msg_type_, hop_count_, link_addr_, peer_addr_
                     if (sizeof(relay) >= 64) { // Rough check that structure has expected fields
-                        std::cout << "PD_WEBHOOK: RelayInfo structure appears to have expected fields" << std::endl;
+                        DEBUG_LOG("PD_WEBHOOK: RelayInfo structure appears to have expected fields");
                         
                         // Dump entire RelayInfo structure to see what Kea actually stores
                         const uint8_t* relay_bytes = reinterpret_cast<const uint8_t*>(&relay);
                         
-                        std::cout << "PD_WEBHOOK: Full RelayInfo dump (" << sizeof(relay) << " bytes):" << std::endl;
+                        DEBUG_LOG("PD_WEBHOOK: Full RelayInfo dump (" << sizeof(relay) << " bytes):");
                         for (size_t i = 0; i < sizeof(relay); i++) {
-                            std::cout << std::hex << std::setw(2) << std::setfill('0') << static_cast<unsigned int>(relay_bytes[i]);
-                            if ((i + 1) % 16 == 0) {
-                                std::cout << std::endl;
-                            } else {
-                                std::cout << " ";
+                            if (g_cfg.debug) {
+                                std::cout << std::hex << std::setw(2) << std::setfill('0') << static_cast<unsigned int>(relay_bytes[i]);
+                                if ((i + 1) % 16 == 0) {
+                                    std::cout << std::endl;
+                                } else {
+                                    std::cout << " ";
+                                }
                             }
                         }
-                        std::cout << std::dec << std::endl;
+                        if (g_cfg.debug) std::cout << std::dec << std::endl;
                         
                         // Look for fe80 pattern (start of link-local address)
                         for (size_t i = 0; i < sizeof(relay) - 1; i++) {
                             if (relay_bytes[i] == 0xfe && relay_bytes[i+1] == 0x80) {
-                                std::cout << "PD_WEBHOOK: Found fe80 pattern at offset " << i << std::endl;
+                                DEBUG_LOG("PD_WEBHOOK: Found fe80 pattern at offset " << i);
                                 
                                 // Extract 16 bytes from this position
                                 if (i + 16 <= sizeof(relay)) {
@@ -351,19 +357,19 @@ extractCpeLinkLocal(const Pkt6Ptr& query) {
                                     }
                                     
                                     std::string extracted_peer = peer_stream.str();
-                                    std::cout << "PD_WEBHOOK: Extracted peer address: " << extracted_peer << std::endl;
+                                    DEBUG_LOG("PD_WEBHOOK: Extracted peer address: " << extracted_peer);
                                     
                                     if (extracted_peer.find("fe80") == 0) {
                                         // Use Kea's IOAddress to properly compress IPv6 address
                                         try {
                                             isc::asiolink::IOAddress addr(extracted_peer);
                                             peer_address = addr.toText();
-                                            std::cout << "PD_WEBHOOK: Using compressed peer address: " << peer_address << std::endl;
+                                            DEBUG_LOG("PD_WEBHOOK: Using compressed peer address: " << peer_address);
                                             return peer_address;
                                         } catch (...) {
                                             // Fallback to original address if compression fails
                                             peer_address = extracted_peer;
-                                            std::cout << "PD_WEBHOOK: Using uncompressed peer address: " << peer_address << std::endl;
+                                            DEBUG_LOG("PD_WEBHOOK: Using uncompressed peer address: " << peer_address);
                                             return peer_address;
                                         }
                                     }
@@ -372,7 +378,7 @@ extractCpeLinkLocal(const Pkt6Ptr& query) {
                         }
                     }
                 } catch (...) {
-                    std::cout << "PD_WEBHOOK: Failed to extract peer address from RelayInfo" << std::endl;
+                    DEBUG_LOG("PD_WEBHOOK: Failed to extract peer address from RelayInfo");
                 }
                 
                 // If we found a peer address, return it
@@ -381,32 +387,32 @@ extractCpeLinkLocal(const Pkt6Ptr& query) {
                 }
             }
         } catch (...) {
-            std::cout << "PD_WEBHOOK: Failed to access relay_info" << std::endl;
+            DEBUG_LOG("PD_WEBHOOK: Failed to access relay_info");
         }
         
         // Check if this packet itself is a relay message
         if (msg_type == DHCPV6_RELAY_FORW || msg_type == DHCPV6_RELAY_REPL) {
-            std::cout << "PD_WEBHOOK: This is a relay message, extracting peer-address" << std::endl;
+            DEBUG_LOG("PD_WEBHOOK: This is a relay message, extracting peer-address");
             
             // For relay messages, try to get from remote address for relayed packets
             if (!query->getRemoteAddr().isV6Zero()) {
                 peer_address = query->getRemoteAddr().toText();
-                std::cout << "PD_WEBHOOK: Using remote address as peer: " << peer_address << std::endl;
+                DEBUG_LOG("PD_WEBHOOK: Using remote address as peer: " << peer_address);
                 
                 if (peer_address.find("fe80::") == 0) {
                     return peer_address;
                 }
             }
         } else {
-            std::cout << "PD_WEBHOOK: Not a relay message, checking for embedded relay info" << std::endl;
+            DEBUG_LOG("PD_WEBHOOK: Not a relay message, checking for embedded relay info");
             
             // Check if this is a regular message that contains relay information
             OptionPtr relay_msg_opt = query->getOption(D6O_RELAY_MSG);
             if (relay_msg_opt) {
-                std::cout << "PD_WEBHOOK: Found RELAY_MSG option, parsing relay message" << std::endl;
+                DEBUG_LOG("PD_WEBHOOK: Found RELAY_MSG option, parsing relay message");
                 
                 const std::vector<uint8_t>& relay_data = relay_msg_opt->getData();
-                std::cout << "PD_WEBHOOK: RELAY_MSG data size: " << relay_data.size() << std::endl;
+                DEBUG_LOG("PD_WEBHOOK: RELAY_MSG data size: " << relay_data.size());
                 
                 if (relay_data.size() >= 34) { // Minimum size for relay message header
                     // Extract peer-address (bytes 18-33)
@@ -424,7 +430,7 @@ extractCpeLinkLocal(const Pkt6Ptr& query) {
                     }
                     
                     peer_address = peer_addr_stream.str();
-                    std::cout << "PD_WEBHOOK: Extracted peer-address from RELAY_MSG: " << peer_address << std::endl;
+                    DEBUG_LOG("PD_WEBHOOK: Extracted peer-address from RELAY_MSG: " << peer_address);
                     
                     // Check if it's a link-local address
                     if (peer_address.find("fe80") == 0) {
@@ -436,10 +442,10 @@ extractCpeLinkLocal(const Pkt6Ptr& query) {
         
         // Log packet addresses for comparison
         if (!query->getRemoteAddr().isV6Zero()) {
-            std::cout << "PD_WEBHOOK: Packet remote address: " << query->getRemoteAddr().toText() << std::endl;
+            DEBUG_LOG("PD_WEBHOOK: Packet remote address: " << query->getRemoteAddr().toText());
         }
         if (!query->getLocalAddr().isV6Zero()) {
-            std::cout << "PD_WEBHOOK: Packet local address: " << query->getLocalAddr().toText() << std::endl;
+            DEBUG_LOG("PD_WEBHOOK: Packet local address: " << query->getLocalAddr().toText());
         }
     }
     
@@ -449,11 +455,13 @@ extractCpeLinkLocal(const Pkt6Ptr& query) {
         const std::vector<uint8_t>& data = clientid_opt->getData();
         
         // Debug: print the raw DUID data
-        std::cout << "PD_WEBHOOK: DUID raw data: ";
-        for (size_t i = 0; i < data.size(); i++) {
-            std::cout << std::hex << std::setw(2) << std::setfill('0') << static_cast<unsigned int>(data[i]);
+        if (g_cfg.debug) {
+            std::cout << "PD_WEBHOOK: DUID raw data: ";
+            for (size_t i = 0; i < data.size(); i++) {
+                std::cout << std::hex << std::setw(2) << std::setfill('0') << static_cast<unsigned int>(data[i]);
+            }
+            std::cout << std::dec << std::endl;
         }
-        std::cout << std::dec << std::endl;
         
         // Client ID format varies by DUID type:
         // DUID-LLT: Type(2) + HWType(2) + Time(4) + MAC(6)
@@ -463,12 +471,12 @@ extractCpeLinkLocal(const Pkt6Ptr& query) {
         if (data.size() >= 8) {
             // Check DUID type (1 = DUID-LLT, 3 = DUID-LL, 4 = DUID-UUID)
             uint16_t duid_type = (static_cast<uint16_t>(data[0]) << 8) | data[1];
-            std::cout << "PD_WEBHOOK: DUID type: " << duid_type << std::endl;
+            DEBUG_LOG("PD_WEBHOOK: DUID type: " << duid_type);
             
             if (duid_type == 1 || duid_type == 3) {  // DUID-LLT or DUID-LL
                 // Extract hardware type
                 uint16_t hw_type = (static_cast<uint16_t>(data[2]) << 8) | data[3];
-                std::cout << "PD_WEBHOOK: Hardware type: " << hw_type << std::endl;
+                DEBUG_LOG("PD_WEBHOOK: Hardware type: " << hw_type);
                 
                 // For Ethernet (type 1), extract 6-byte MAC
                 if (hw_type == 1) {
@@ -481,12 +489,13 @@ extractCpeLinkLocal(const Pkt6Ptr& query) {
                             mac[i] = data[mac_offset + i];
                         }
                         
-                        std::cout << "PD_WEBHOOK: Extracted MAC: ";
-                        for (int i = 0; i < 6; i++) {
-                            std::cout << std::hex << std::setw(2) << std::setfill('0') << static_cast<unsigned int>(mac[i]);
-                            if (i < 5) std::cout << ":";
-                        }
-                        std::cout << std::dec << std::endl;
+                        DEBUG_LOG("PD_WEBHOOK: Extracted MAC: " 
+                                << std::hex << std::setw(2) << std::setfill('0') << static_cast<unsigned int>(mac[0]) << ":"
+                                << std::hex << std::setw(2) << std::setfill('0') << static_cast<unsigned int>(mac[1]) << ":"
+                                << std::hex << std::setw(2) << std::setfill('0') << static_cast<unsigned int>(mac[2]) << ":"
+                                << std::hex << std::setw(2) << std::setfill('0') << static_cast<unsigned int>(mac[3]) << ":"
+                                << std::hex << std::setw(2) << std::setfill('0') << static_cast<unsigned int>(mac[4]) << ":"
+                                << std::hex << std::setw(2) << std::setfill('0') << static_cast<unsigned int>(mac[5]));
                         
                         // Build EUI-64 identifier from MAC
                         std::ostringstream link_local;
@@ -503,7 +512,7 @@ extractCpeLinkLocal(const Pkt6Ptr& query) {
                         link_local << ":" << std::setw(2) << static_cast<unsigned int>(mac[4]) << std::setw(2) << static_cast<unsigned int>(mac[5]);
                         
                         std::string duid_link_local = link_local.str();
-                        std::cout << "PD_WEBHOOK: Generated link-local from DUID: " << duid_link_local << std::endl;
+                        DEBUG_LOG("PD_WEBHOOK: Generated link-local from DUID: " << duid_link_local);
                         
                         // If we didn't get a good peer address, use the DUID-based one
                         if (peer_address.empty() || peer_address.find("fe80") != 0) {
@@ -595,7 +604,7 @@ notifyPdAssigned(const Pkt6Ptr& query6,
         return;
     }
     
-    std::cout << "PD_WEBHOOK: found " << pd_leases.size() << " PD leases" << std::endl;
+    DEBUG_LOG("PD_WEBHOOK: found " << pd_leases.size() << " PD leases");
 
     // Send original webhook notification if configured
     if (g_cfg.enabled && !g_cfg.url.empty()) {
@@ -641,14 +650,14 @@ notifyPdAssigned(const Pkt6Ptr& query6,
 
     // NetBox integration - simplified fire-and-forget approach
     if (g_cfg.netbox_enabled) {
-        std::cout << "PD_WEBHOOK: NetBox enabled, processing " << pd_leases.size() << " PD leases" << std::endl;
+        DEBUG_LOG("PD_WEBHOOK: NetBox enabled, processing " << pd_leases.size() << " PD leases");
         for (const auto& l : pd_leases) {
             PdAssignmentData data = buildAssignmentData(query6, l);
-            std::cout << "PD_WEBHOOK: Sending NetBox request for prefix " << data.prefix << "/" << data.prefix_length << std::endl;
+            DEBUG_LOG("PD_WEBHOOK: Sending NetBox request for prefix " << data.prefix << "/" << data.prefix_length);
             sendNetBoxRequest(data, l->valid_lft_, l->preferred_lft_);
         }
     } else {
-        std::cout << "PD_WEBHOOK: NetBox disabled" << std::endl;
+        DEBUG_LOG("PD_WEBHOOK: NetBox disabled");
     }
 }
 
@@ -658,10 +667,10 @@ extern "C" {
 int
 lease6_renew(CalloutHandle& handle) {
     try {
-        std::cout << "PD_WEBHOOK: lease6_renew called" << std::endl;
+        DEBUG_LOG("PD_WEBHOOK: lease6_renew called");
         
         if (!g_cfg.netbox_enabled) {
-            std::cout << "PD_WEBHOOK: NetBox disabled, returning" << std::endl;
+            DEBUG_LOG("PD_WEBHOOK: NetBox disabled, returning");
             return (0);
         }
 
@@ -680,8 +689,8 @@ lease6_renew(CalloutHandle& handle) {
             return (0);
         }
 
-        std::cout << "PD_WEBHOOK: Processing PD lease renewal for " << lease6->addr_.toText() 
-                  << "/" << static_cast<int>(lease6->prefixlen_) << std::endl;
+        DEBUG_LOG("PD_WEBHOOK: Processing PD lease renewal for " << lease6->addr_.toText() 
+                  << "/" << static_cast<int>(lease6->prefixlen_));
 
         // Build assignment data
         PdAssignmentData data = buildAssignmentData(query6, lease6);
@@ -701,11 +710,11 @@ int
 leases6_committed(CalloutHandle& handle) {
     try {
         // Always log that hook was called
-        std::cout << "PD_WEBHOOK: leases6_committed called" << std::endl;
+        DEBUG_LOG("PD_WEBHOOK: leases6_committed called");
         
-        std::cout << "PD_WEBHOOK: g_cfg.enabled=" << g_cfg.enabled << ", g_cfg.netbox_enabled=" << g_cfg.netbox_enabled << std::endl;
+        DEBUG_LOG("PD_WEBHOOK: g_cfg.enabled=" << g_cfg.enabled << ", g_cfg.netbox_enabled=" << g_cfg.netbox_enabled);
         if (!g_cfg.enabled) {
-            std::cout << "PD_WEBHOOK: hook disabled, returning" << std::endl;
+            DEBUG_LOG("PD_WEBHOOK: hook disabled, returning");
             return (0);
         }
 
@@ -781,6 +790,11 @@ load(LibraryHandle& handle) {
         ConstElementPtr netbox_enabled_el = params->get("netbox-enabled");
         if (netbox_enabled_el && netbox_enabled_el->getType() == Element::boolean) {
             g_cfg.netbox_enabled = netbox_enabled_el->boolValue();
+        }
+        
+        ConstElementPtr debug_el = params->get("debug");
+        if (debug_el && debug_el->getType() == Element::boolean) {
+            g_cfg.debug = debug_el->boolValue();
         }
     }
 
