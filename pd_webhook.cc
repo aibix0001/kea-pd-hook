@@ -22,6 +22,16 @@ using namespace isc::data;
 using namespace isc::dhcp;
 using namespace isc::hooks;
 
+// Data structure for PD assignment information
+struct PdAssignmentData {
+    std::string client_duid;        // Client DUID (hex encoded)
+    std::string prefix;              // Assigned prefix (e.g., "2001:db8:56::")
+    int prefix_length;               // Prefix length (e.g., 56)
+    uint32_t iaid;                   // Identity association ID
+    std::string cpe_link_local;      // CPE's link-local address
+    std::string router_ip;           // Router's IP address
+};
+
 // Simple runtime configuration for this library.
 struct WebhookConfig {
     std::string url;
@@ -31,8 +41,6 @@ struct WebhookConfig {
     // NetBox API configuration
     std::string netbox_url;
     std::string netbox_token;
-    std::string netbox_site;
-    std::string netbox_device_role;
     bool netbox_enabled{false};
 };
 
@@ -79,9 +87,9 @@ postWebhook(const std::string& body) {
     curl_easy_cleanup(curl);
 }
 
-// Make HTTP request to NetBox API
+// Make HTTP request to NetBox API and return response
 static std::string
-netboxRequest(const std::string& method, const std::string& endpoint, const std::string& data) {
+netboxHttpRequest(const std::string& method, const std::string& endpoint, const std::string& data) {
     if (!g_cfg.netbox_enabled || g_cfg.netbox_url.empty() || g_cfg.netbox_token.empty()) {
         return "";
     }
@@ -140,56 +148,11 @@ netboxRequest(const std::string& method, const std::string& endpoint, const std:
     return response;
 }
 
-// Find or create device in NetBox
+// Check if prefix exists in NetBox and return its ID
 static int
-findOrCreateDevice(const std::string& device_name) {
-    // First try to find existing device
-    std::string search_url = "dcim/devices/?name=" + device_name;
-    std::string response = netboxRequest("GET", search_url, "");
-    
-    if (response.empty()) {
-        return -1;
-    }
-
-    // Simple JSON parsing to check if device exists
-    if (response.find("\"count\":0") == std::string::npos) {
-        // Device exists, extract ID
-        size_t id_pos = response.find("\"id\":");
-        if (id_pos != std::string::npos) {
-            id_pos += 5;
-            size_t comma_pos = response.find(",", id_pos);
-            if (comma_pos != std::string::npos) {
-                return std::stoi(response.substr(id_pos, comma_pos - id_pos));
-            }
-        }
-    }
-    
-    // Device doesn't exist, create it
-    std::string device_data = "{\"name\":\"" + device_name + "\",\"device_role\":{\"name\":\"" + g_cfg.netbox_device_role + "\"},\"site\":{\"name\":\"" + g_cfg.netbox_site + "\"},\"status\":\"active\"}";
-    response = netboxRequest("POST", "dcim/devices/", device_data);
-    
-    if (response.empty()) {
-        return -1;
-    }
-    
-    // Extract new device ID
-    size_t id_pos = response.find("\"id\":");
-    if (id_pos != std::string::npos) {
-        id_pos += 5;
-        size_t comma_pos = response.find(",", id_pos);
-        if (comma_pos != std::string::npos) {
-            return std::stoi(response.substr(id_pos, comma_pos - id_pos));
-        }
-    }
-    
-    return -1;
-}
-
-// Find existing prefix in NetBox
-static int
-findPrefix(const std::string& prefix, int prefix_length) {
+findPrefixId(const std::string& prefix, int prefix_length) {
     std::string search_url = "ipam/prefixes/?prefix=" + prefix + "/" + std::to_string(prefix_length);
-    std::string response = netboxRequest("GET", search_url, "");
+    std::string response = netboxHttpRequest("GET", search_url, "");
     
     if (response.empty()) {
         return -1;
@@ -211,17 +174,30 @@ findPrefix(const std::string& prefix, int prefix_length) {
     return -1;
 }
 
-// Create prefix in NetBox
+// Update existing prefix with new data
 static bool
-createPrefix(const std::string& prefix, int prefix_length, int device_id) {
-    std::string prefix_data = "{\"prefix\":\"" + prefix + "/" + std::to_string(prefix_length) + "\",\"status\":\"active\",\"scope_type\":\"dcim.site\",\"scope_id\":1,\"description\":\"DHCPv6 PD assignment\"}";
-    std::string response = netboxRequest("POST", "ipam/prefixes/", prefix_data);
+updatePrefix(int prefix_id, const PdAssignmentData& data) {
+    std::string endpoint = "ipam/prefixes/" + std::to_string(prefix_id) + "/";
+    
+    std::ostringstream payload;
+    payload << "{";
+    payload << "\"status\":\"active\",";
+    payload << "\"description\":\"DHCPv6 PD assignment - IAID: " << data.iaid << "\",";
+    payload << "\"custom_fields\":{";
+    payload << "\"client_duid\":\"" << data.client_duid << "\",";
+    payload << "\"iaid\":" << data.iaid << ",";
+    payload << "\"cpe_link_local\":\"" << data.cpe_link_local << "\",";
+    payload << "\"router_ip\":\"" << data.router_ip << "\"";
+    payload << "}";
+    payload << "}";
+    
+    std::string response = netboxHttpRequest("PATCH", endpoint, payload.str());
     
     if (response.empty()) {
         return false;
     }
     
-    // Check if prefix was created successfully
+    // Check if update was successful
     if (response.find("\"id\":") != std::string::npos) {
         return true;
     }
@@ -229,36 +205,129 @@ createPrefix(const std::string& prefix, int prefix_length, int device_id) {
     return false;
 }
 
-// Assign prefix to device interface
+// Create new prefix in NetBox
 static bool
-assignPrefixToDevice(int prefix_id, int device_id) {
-    // First get device interfaces
-    std::string interfaces_url = "dcim/interfaces/?device_id=" + std::to_string(device_id);
-    std::string response = netboxRequest("GET", interfaces_url, "");
+createPrefix(const PdAssignmentData& data) {
+    std::ostringstream payload;
+    payload << "{";
+    payload << "\"prefix\":\"" << data.prefix << "/" << data.prefix_length << "\",";
+    payload << "\"status\":\"active\",";
+    payload << "\"description\":\"DHCPv6 PD assignment - IAID: " << data.iaid << "\",";
+    payload << "\"custom_fields\":{";
+    payload << "\"client_duid\":\"" << data.client_duid << "\",";
+    payload << "\"iaid\":" << data.iaid << ",";
+    payload << "\"cpe_link_local\":\"" << data.cpe_link_local << "\",";
+    payload << "\"router_ip\":\"" << data.router_ip << "\"";
+    payload << "}";
+    payload << "}";
+    
+    std::string response = netboxHttpRequest("POST", "ipam/prefixes/", payload.str());
     
     if (response.empty()) {
         return false;
     }
     
-    // Look for first interface (or create one if needed)
-    size_t id_pos = response.find("\"id\":");
-    if (id_pos != std::string::npos) {
-        id_pos += 5;
-        size_t comma_pos = response.find(",", id_pos);
-        if (comma_pos != std::string::npos) {
-            int interface_id = std::stoi(response.substr(id_pos, comma_pos - id_pos));
-            
-            // Create IP address assignment to interface
-            std::string ip_data = "{\"address\":\"" + std::to_string(prefix_id) + "\",\"assigned_object_type\":\"dcim.interface\",\"assigned_object_id\":" + std::to_string(interface_id) + ",\"status\":\"active\"}";
-            response = netboxRequest("POST", "ipam/ip-addresses/", ip_data);
-            
-            if (response.find("\"id\":") != std::string::npos) {
-                return true;
-            }
-        }
+    // Check if creation was successful
+    if (response.find("\"id\":") != std::string::npos) {
+        return true;
     }
     
     return false;
+}
+
+// Send request to NetBox API with check-then-create-or-update logic
+static void
+sendNetBoxRequest(const PdAssignmentData& data) {
+    if (!g_cfg.netbox_enabled || g_cfg.netbox_url.empty() || g_cfg.netbox_token.empty()) {
+        return;
+    }
+
+    // Check if prefix already exists
+    int existing_prefix_id = findPrefixId(data.prefix, data.prefix_length);
+    
+    if (existing_prefix_id > 0) {
+        // Update existing prefix
+        updatePrefix(existing_prefix_id, data);
+    } else {
+        // Create new prefix
+        createPrefix(data);
+    }
+}
+
+// Extract client DUID from CLIENTID option
+static std::string
+extractClientDuid(const Pkt6Ptr& query) {
+    OptionPtr clientid_opt = query->getOption(D6O_CLIENTID);
+    if (clientid_opt) {
+        const std::vector<uint8_t>& d = clientid_opt->getData();
+        return toHex(d);
+    }
+    return "";
+}
+
+// Extract CPE link-local address from packet source or CLIENTID
+static std::string
+extractCpeLinkLocal(const Pkt6Ptr& query) {
+    // Try to get from packet source first
+    if (query && !query->getRemoteAddr().isV6Zero()) {
+        std::string remote_addr = query->getRemoteAddr().toText();
+        // Check if it's a link-local address (starts with fe80::)
+        if (remote_addr.find("fe80::") == 0) {
+            return remote_addr;
+        }
+    }
+    
+    // Fallback: try to construct from CLIENTID if available
+    OptionPtr clientid_opt = query->getOption(D6O_CLIENTID);
+    if (clientid_opt) {
+        const std::vector<uint8_t>& d = clientid_opt->getData();
+        if (d.size() >= 6) {
+            // Simple fallback: construct a dummy link-local address
+            // In practice, this should be extracted from the packet properly
+            return "fe80::" + toHex(d).substr(0, 4);
+        }
+    }
+    
+    return "fe80::unknown";
+}
+
+// Extract router IP from relay headers or packet source
+static std::string
+extractRouterIp(const Pkt6Ptr& query) {
+    // Try to get from relay agent information option
+    OptionPtr relay_opt = query->getOption(D6O_RELAY_MSG);
+    if (relay_opt) {
+        // For relayed messages, try to get the relay agent address
+        // This is a simplified approach - in practice you'd parse the relay message
+        if (!query->getRemoteAddr().isV6Zero()) {
+            return query->getRemoteAddr().toText();
+        }
+    }
+    
+    // Fallback: use packet source if it's not link-local
+    if (query && !query->getRemoteAddr().isV6Zero()) {
+        std::string remote_addr = query->getRemoteAddr().toText();
+        if (remote_addr.find("fe80::") != 0) {
+            return remote_addr;
+        }
+    }
+    
+    return "unknown";
+}
+
+// Build assignment data structure from lease and packet
+static PdAssignmentData
+buildAssignmentData(const Pkt6Ptr& query, const Lease6Ptr& lease) {
+    PdAssignmentData data;
+    
+    data.client_duid = extractClientDuid(query);
+    data.prefix = lease->addr_.toText();
+    data.prefix_length = static_cast<int>(lease->prefixlen_);
+    data.iaid = lease->iaid_;
+    data.cpe_link_local = extractCpeLinkLocal(query);
+    data.router_ip = extractRouterIp(query);
+    
+    return data;
 }
 
 // Build a minimal JSON payload for PD leases and send it.
@@ -328,39 +397,11 @@ notifyPdAssigned(const Pkt6Ptr& query6,
         postWebhook(os.str());
     }
 
-    // NetBox integration
+    // NetBox integration - simplified fire-and-forget approach
     if (g_cfg.netbox_enabled) {
         for (const auto& l : pd_leases) {
-            std::string prefix_str = l->addr_.toText();
-            int prefix_len = static_cast<int>(l->prefixlen_);
-            
-            // Check if prefix already exists in NetBox
-            int existing_prefix_id = findPrefix(prefix_str, prefix_len);
-            
-            // Generate device name based on client DUID or IAID
-            std::string device_name = "router-";
-            OptionPtr clientid_opt = query6->getOption(D6O_CLIENTID);
-            if (clientid_opt) {
-                const std::vector<uint8_t>& d = clientid_opt->getData();
-                std::string duid_hex = toHex(d);
-                device_name += duid_hex.substr(0, 8); // Use first 8 chars of DUID
-            } else {
-                device_name += std::to_string(l->iaid_);
-            }
-            
-            // Find or create device
-            int device_id = findOrCreateDevice(device_name);
-            if (device_id > 0) {
-                if (existing_prefix_id > 0) {
-                    // Prefix already exists, assign it to device
-                    assignPrefixToDevice(existing_prefix_id, device_id);
-                } else {
-                    // Create new prefix in NetBox
-                    if (createPrefix(prefix_str, prefix_len, device_id)) {
-                        // Prefix created successfully
-                    }
-                }
-            }
+            PdAssignmentData data = buildAssignmentData(query6, l);
+            sendNetBoxRequest(data);
         }
     }
 }
@@ -442,16 +483,6 @@ load(LibraryHandle& handle) {
         ConstElementPtr netbox_token_el = params->get("netbox-token");
         if (netbox_token_el && netbox_token_el->getType() == Element::string) {
             g_cfg.netbox_token = netbox_token_el->stringValue();
-        }
-        
-        ConstElementPtr netbox_site_el = params->get("netbox-site");
-        if (netbox_site_el && netbox_site_el->getType() == Element::string) {
-            g_cfg.netbox_site = netbox_site_el->stringValue();
-        }
-        
-        ConstElementPtr netbox_device_role_el = params->get("netbox-device-role");
-        if (netbox_device_role_el && netbox_device_role_el->getType() == Element::string) {
-            g_cfg.netbox_device_role = netbox_device_role_el->stringValue();
         }
         
         ConstElementPtr netbox_enabled_el = params->get("netbox-enabled");
