@@ -34,4 +34,4 @@ class LogPrefixDataScript(Script):
             for key, value in custom_data.items():
                 self.log_info(f"  {key}: {value}")
 
-        return f"Successfully logged data for prefix {prefix.custom_fields}"
+        return f"Successfully logged data for prefix {prefix.custom_fields.dhcpv6_cpe_link_local}"
