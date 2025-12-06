@@ -16,7 +16,7 @@ class ExtractPrefixDataWebhookScript(Script):
     
     webhook_url = StringVar(
         description="Webhook URL to send configuration data to",
-        default="http://localhost:5000/configure-router"
+        default="http://192.168.10.76:5000/configure-router"
     )
 
     def run(self, data, commit):
