@@ -1,5 +1,6 @@
 from extras.scripts import *
 from ipam.models import Prefix
+from pprint import pprint
 
 
 class LogPrefixDataScript(Script):
@@ -33,4 +34,4 @@ class LogPrefixDataScript(Script):
             for key, value in custom_data.items():
                 self.log_info(f"  {key}: {value}")
 
-        return f"Successfully logged data for prefix {type(prefix), dir(prefix), prefix.prefix}"
+        return f"Successfully logged data for prefix {type(prefix), pprint(dir(prefix)), prefix.prefix}"
