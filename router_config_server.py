@@ -393,7 +393,7 @@ class VyOSRouter:
             return False
         
         try:
-            # Check current mode first
+            # Check current mode and handle different VyOS modes
             logger.info("Checking current router mode...")
             stdin, stdout, stderr = self.ssh.exec_command("show configuration commands | head -1")
             mode_output = stdout.read().decode().strip()
@@ -413,8 +413,25 @@ class VyOSRouter:
                     logger.error(f"Configure mode error: {config_error}")
                     return False
             else:
-                logger.info("Router is already in configuration mode")
+                logger.info("Router appears to be in configuration or build mode")
                 logger.info(f"Current mode output: {mode_output}")
+                
+                # Try to exit build mode and enter configuration mode
+                logger.info("Attempting to exit current mode and enter configuration mode...")
+                stdin, stdout, stderr = self.ssh.exec_command("exit")
+                time.sleep(1)
+                
+                # Now try to enter configuration mode
+                stdin, stdout, stderr = self.ssh.exec_command("configure")
+                time.sleep(2)
+                
+                # Check if we successfully entered configuration mode
+                config_output = stdout.read().decode().strip()
+                config_error = stderr.read().decode().strip()
+                logger.info(f"Configure mode output: {config_output}")
+                if config_error:
+                    logger.error(f"Configure mode error after exit: {config_error}")
+                    return False
             
             # Add the route - try different syntax variations
             route_cmd = f"set protocols static route6 {prefix_cidr} next-hop {cpe_link_local} interface {interface_name}"
