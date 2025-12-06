@@ -315,16 +315,21 @@ class VyOSRouter:
             logger.info(f"Connecting to VyOS router at {self.router_ip}")
             self.ssh.connect(self.router_ip, username=self.username, timeout=self.timeout)
             
-            # Get VyOS version and check available commands
-            logger.info("Checking VyOS version and available commands...")
+            # Check current mode and get basic info
+            logger.info("Checking router status...")
             stdin, stdout, stderr = self.ssh.exec_command("show version")
             version_output = stdout.read().decode().strip()
-            logger.info(f"VyOS version: {version_output}")
+            if version_output:
+                logger.info(f"VyOS version: {version_output}")
             
-            # Check if we're in operational mode
-            stdin, stdout, stderr = self.ssh.exec_command("show configuration commands | head -5")
+            # Check if we're already in configuration mode
+            stdin, stdout, stderr = self.ssh.exec_command("show configuration commands | head -3")
             config_sample = stdout.read().decode().strip()
-            logger.info(f"Sample config commands: {config_sample}")
+            if config_sample and not config_sample.startswith("Invalid command"):
+                logger.info(f"Router appears to be in configuration mode")
+                logger.info(f"Sample config: {config_sample}")
+            else:
+                logger.info("Router is in operational mode")
             
             return True
             
@@ -388,18 +393,28 @@ class VyOSRouter:
             return False
         
         try:
-            # Enter configuration mode
-            logger.info("Entering configuration mode")
-            stdin, stdout, stderr = self.ssh.exec_command("configure")
-            time.sleep(2)
+            # Check current mode first
+            logger.info("Checking current router mode...")
+            stdin, stdout, stderr = self.ssh.exec_command("show configuration commands | head -1")
+            mode_output = stdout.read().decode().strip()
+            mode_error = stderr.read().decode().strip()
             
-            # Check if we successfully entered configuration mode
-            config_output = stdout.read().decode().strip()
-            config_error = stderr.read().decode().strip()
-            logger.info(f"Configure mode output: {config_output}")
-            if config_error:
-                logger.error(f"Configure mode error: {config_error}")
-                return False
+            if mode_error or "Invalid command" in mode_output:
+                # We're in operational mode, need to enter configure
+                logger.info("Router is in operational mode, entering configuration mode")
+                stdin, stdout, stderr = self.ssh.exec_command("configure")
+                time.sleep(2)
+                
+                # Check if we successfully entered configuration mode
+                config_output = stdout.read().decode().strip()
+                config_error = stderr.read().decode().strip()
+                logger.info(f"Configure mode output: {config_output}")
+                if config_error:
+                    logger.error(f"Configure mode error: {config_error}")
+                    return False
+            else:
+                logger.info("Router is already in configuration mode")
+                logger.info(f"Current mode output: {mode_output}")
             
             # Add the route - try different syntax variations
             route_cmd = f"set protocols static route6 {prefix_cidr} next-hop {cpe_link_local} interface {interface_name}"
