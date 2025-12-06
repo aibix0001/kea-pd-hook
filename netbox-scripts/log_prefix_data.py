@@ -30,6 +30,6 @@ class LogPrefixDataScript(Script):
         # Log custom fields
         self.log_info(f"Custom Fields:")
         for custom_field in prefix.custom_fields:
-            self.log_info(f"  {custom_field.description}")
+            self.log_info(f"  {custom_field.name}")
 
         return f"Successfully logged data for prefix {prefix.custom_fields}"
