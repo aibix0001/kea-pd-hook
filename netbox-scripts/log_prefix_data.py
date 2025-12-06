@@ -30,7 +30,7 @@ class LogPrefixDataScript(Script):
         # Log custom fields
         custom_data = prefix.custom_fields
         if custom_data:
-            self.log_info("Custom Fields: custom_data.objects")
+            self.log_info(f"Custom Fields: {custom_data.objects}")
             for key, value in custom_data.objects:
                 self.log_info(f"  {key}: {value}")
 
