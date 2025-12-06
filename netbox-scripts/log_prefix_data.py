@@ -25,7 +25,7 @@ class LogPrefixDataScript(Script):
 
         # Log prefix information
         self.log_info(f"Prefix: {prefix.prefix}")
-        for key, value in prefix.to_dict().items():
+        for key, value in prefix.items():
             self.log_info(f"{key}: {value}")
 
         # Log custom fields
