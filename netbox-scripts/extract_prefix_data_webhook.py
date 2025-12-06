@@ -77,7 +77,7 @@ class ExtractPrefixDataWebhookScript(Script):
         # Prepare webhook payload
         payload = {
             "prefix": prefix_cidr,
-            "router_ip": router_ip,
+            "router_ipv6": router_ip,  # Changed from router_ip to router_ipv6
             "cpe_link_local": cpe_link_local,
             "leasetime": leasetime,
             "client_duid": client_duid,
