@@ -320,6 +320,55 @@ class VyOSRouter:
             logger.error(f"Failed to connect to {self.router_ip}: {str(e)}")
             return False
     
+    def verify_route(self, prefix_cidr: str, cpe_link_local: str, interface_name: str) -> bool:
+        """Verify that route was successfully configured"""
+        if not self.ssh:
+            logger.error("SSH connection not established for verification")
+            return False
+            
+        try:
+            # Show configuration commands to verify route exists
+            verify_cmd = f"show configuration commands | match 'set protocols static route6 {prefix_cidr}'"
+            logger.info(f"Verifying route with: {verify_cmd}")
+            stdin, stdout, stderr = self.ssh.exec_command(verify_cmd)
+            
+            output = stdout.read().decode().strip()
+            error_output = stderr.read().decode().strip()
+            
+            if error_output:
+                logger.error(f"Verification command error: {error_output}")
+                return False
+            
+            # Check if route configuration exists in output
+            expected_route = f"set protocols static route6 {prefix_cidr} next-hop {cpe_link_local} interface {interface_name}"
+            
+            if expected_route in output:
+                logger.info(f"✅ Route verification successful: {expected_route}")
+                return True
+            else:
+                logger.error(f"❌ Route verification failed. Expected: {expected_route}")
+                logger.error(f"❌ Actual output: {output}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Failed to verify route: {str(e)}")
+            return False
+            
+            # Check if the route configuration exists in output
+            expected_route = f"set protocols static route6 {prefix_cidr} next-hop {cpe_link_local} interface {interface_name}"
+            
+            if expected_route in output:
+                logger.info(f"✅ Route verification successful: {expected_route}")
+                return True
+            else:
+                logger.error(f"❌ Route verification failed. Expected: {expected_route}")
+                logger.error(f"❌ Actual output: {output}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Failed to verify route: {str(e)}")
+            return False
+
     def configure_route(self, prefix_cidr: str, cpe_link_local: str, interface_name: str) -> bool:
         """Configure static route on VyOS router"""
         if not self.ssh:
@@ -348,14 +397,29 @@ class VyOSRouter:
             stdin, stdout, stderr = self.ssh.exec_command("commit")
             time.sleep(2)
             
+            # Check commit output
+            commit_output = stdout.read().decode().strip()
+            commit_error = stderr.read().decode().strip()
+            
+            if commit_error:
+                logger.error(f"Commit error: {commit_error}")
+                return False
+            
             logger.info("Saving configuration")
             stdin, stdout, stderr = self.ssh.exec_command("save")
             
             # Exit configuration mode
             stdin, stdout, stderr = self.ssh.exec_command("exit")
+            time.sleep(1)
             
-            logger.info(f"Successfully configured route for {prefix_cidr} via {cpe_link_local}")
-            return True
+            # Verify the route was actually configured
+            logger.info("Verifying route configuration...")
+            if self.verify_route(prefix_cidr, cpe_link_local, interface_name):
+                logger.info(f"✅ Successfully configured and verified route for {prefix_cidr} via {cpe_link_local} interface {interface_name}")
+                return True
+            else:
+                logger.error(f"❌ Route configuration verification failed for {prefix_cidr}")
+                return False
             
         except Exception as e:
             logger.error(f"Failed to configure route: {str(e)}")
@@ -589,6 +653,97 @@ def test_router_connection():
         }), 500
 
 
+@app.route('/verify-routes', methods=['POST'])
+def verify_routes():
+    """Verify existing routes on a router"""
+    try:
+        data = request.get_json()
+        
+        if not data or "router_ip" not in data:
+            return jsonify({"status": "error", "message": "router_ip is required"}), 400
+        
+        router_ip = data["router_ip"]
+        username = data.get("username", "vyos")
+        prefix_cidr = data.get("prefix_cidr", "")
+        
+        router = VyOSRouter(router_ip, username)
+        
+        if not router.connect():
+            return jsonify({
+                "status": "error",
+                "message": f"Failed to connect to router at {router_ip}",
+                "router_ip": router_ip
+            }), 500
+        
+        try:
+            if not router.ssh:
+                return jsonify({
+                    "status": "error",
+                    "message": "SSH connection not established",
+                    "router_ip": router_ip
+                }), 500
+                
+            if prefix_cidr:
+                # Verify specific route
+                verify_cmd = f"show configuration commands | match 'set protocols static route6 {prefix_cidr}'"
+                logger.info(f"Verifying specific route with: {verify_cmd}")
+                stdin, stdout, stderr = router.ssh.exec_command(verify_cmd)
+                
+                output = stdout.read().decode().strip()
+                error_output = stderr.read().decode().strip()
+                
+                if error_output:
+                    return jsonify({
+                        "status": "error",
+                        "message": f"Verification command error: {error_output}",
+                        "router_ip": router_ip,
+                        "prefix_cidr": prefix_cidr
+                    }), 500
+                
+                return jsonify({
+                    "status": "success",
+                    "message": f"Route verification completed for {prefix_cidr}",
+                    "router_ip": router_ip,
+                    "prefix_cidr": prefix_cidr,
+                    "route_config": output,
+                    "route_exists": bool(output.strip())
+                })
+            else:
+                # Show all static routes
+                routes_cmd = "show configuration commands | match 'set protocols static route6'"
+                logger.info(f"Getting all static routes with: {routes_cmd}")
+                stdin, stdout, stderr = router.ssh.exec_command(routes_cmd)
+                
+                output = stdout.read().decode().strip()
+                error_output = stderr.read().decode().strip()
+                
+                if error_output:
+                    return jsonify({
+                        "status": "error",
+                        "message": f"Routes command error: {error_output}",
+                        "router_ip": router_ip
+                    }), 500
+                
+                routes = output.split('\n') if output.strip() else []
+                
+                return jsonify({
+                    "status": "success",
+                    "message": f"Retrieved {len(routes)} static routes",
+                    "router_ip": router_ip,
+                    "routes": routes,
+                    "routes_count": len(routes)
+                })
+                
+        finally:
+            router.close()
+    
+    except Exception as e:
+        return jsonify({
+            "status": "error",
+            "message": f"Route verification failed: {str(e)}"
+        }), 500
+
+
 if __name__ == '__main__':
     print("Starting VyOS Router Configuration Server...")
     print("Available endpoints:")
@@ -596,6 +751,7 @@ if __name__ == '__main__':
     print("  GET  /health - Health check")
     print("  GET  /history - Get configuration history")
     print("  POST /test-connection - Test router connection")
+    print("  POST /verify-routes - Verify existing routes on router")
     print("  POST /reset - Reset configuration history")
     print()
     print("Example webhook payload:")
@@ -608,6 +764,15 @@ if __name__ == '__main__':
     print('    "client_duid": "0001000123456789",')
     print('    "iaid": 12345')
     print("  }")
+    print()
+    print("Route verification examples:")
+    print("  curl -X POST http://localhost:5000/verify-routes \\")
+    print('    -H "Content-Type: application/json" \\')
+    print('    -d \'{"router_ip": "192.168.10.76", "username": "vyos"}\'')
+    print()
+    print("  curl -X POST http://localhost:5000/verify-routes \\")
+    print('    -H "Content-Type: application/json" \\')
+    print('    -d \'{"router_ip": "192.168.10.76", "prefix_cidr": "2001:db8:56::/56"}\'')
     print()
     
     app.run(host='0.0.0.0', port=5000, debug=True)
