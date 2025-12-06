@@ -156,6 +156,63 @@ kea-dhcp6 -c kea-dhcp6.conf -v
 journalctl -u isc-kea-dhcp6-server -f
 ```
 
+## Router Configuration Server
+
+This project includes a Flask server (`router_config_server.py`) that receives webhook data from NetBox and automatically configures VyOS routers with DHCPv6 prefix delegation routes.
+
+### Architecture
+
+The solution is split into two parts:
+
+1. **NetBox Script** (`netbox-scripts/extract_prefix_data_webhook.py`):
+   - Runs on NetBox server
+   - Extracts prefix custom fields from NetBox
+   - Sends webhook to configuration server
+   - Updates `automation_was_here` flag on success
+
+2. **Router Configuration Server** (`router_config_server.py`):
+   - Receives webhook data from NetBox
+   - Validates lease information
+   - Connects to VyOS router via SSH
+   - Configures static routes
+   - Maintains configuration history
+
+### Setup
+
+```bash
+# Install Python dependencies
+uv add flask paramiko requests
+
+# Start the router configuration server
+uv run python router_config_server.py
+```
+
+### Testing
+
+```bash
+# Test the server
+uv run python test_router_client.py
+
+# Manual test
+curl -X POST http://localhost:5000/configure-router \
+  -H "Content-Type: application/json" \
+  -d '{
+    "prefix": "2001:db8:56::/56",
+    "router_ip": "192.168.1.100",
+    "cpe_link_local": "fe80::1234:5678:9abc:def0",
+    "leasetime": 1734076800
+  }'
+```
+
+### Complete Workflow
+
+1. **Kea Hook** creates NetBox prefix with DHCPv6 data
+2. **NetBox Script** extracts data and sends webhook
+3. **Router Server** configures the VyOS router
+4. **NetBox Script** updates `automation_was_here` flag
+
+This creates a complete automated workflow from DHCPv6 PD assignment to router configuration.
+
 ## Development
 
 This project follows Kea hook library conventions and uses C++17 standards. See `AGENTS.md` for detailed development guidelines and build commands.
