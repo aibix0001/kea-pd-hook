@@ -314,6 +314,18 @@ class VyOSRouter:
             
             logger.info(f"Connecting to VyOS router at {self.router_ip}")
             self.ssh.connect(self.router_ip, username=self.username, timeout=self.timeout)
+            
+            # Get VyOS version and check available commands
+            logger.info("Checking VyOS version and available commands...")
+            stdin, stdout, stderr = self.ssh.exec_command("show version")
+            version_output = stdout.read().decode().strip()
+            logger.info(f"VyOS version: {version_output}")
+            
+            # Check if we're in operational mode
+            stdin, stdout, stderr = self.ssh.exec_command("show configuration commands | head -5")
+            config_sample = stdout.read().decode().strip()
+            logger.info(f"Sample config commands: {config_sample}")
+            
             return True
             
         except Exception as e:
@@ -379,34 +391,77 @@ class VyOSRouter:
             # Enter configuration mode
             logger.info("Entering configuration mode")
             stdin, stdout, stderr = self.ssh.exec_command("configure")
-            time.sleep(1)
+            time.sleep(2)
             
-            # Add the route
+            # Check if we successfully entered configuration mode
+            config_output = stdout.read().decode().strip()
+            config_error = stderr.read().decode().strip()
+            logger.info(f"Configure mode output: {config_output}")
+            if config_error:
+                logger.error(f"Configure mode error: {config_error}")
+                return False
+            
+            # Add the route - try different syntax variations
             route_cmd = f"set protocols static route6 {prefix_cidr} next-hop {cpe_link_local} interface {interface_name}"
             logger.info(f"Executing: {route_cmd}")
             stdin, stdout, stderr = self.ssh.exec_command(route_cmd)
+            time.sleep(1)
             
-            # Check for errors
-            error_output = stderr.read().decode().strip()
-            if error_output:
-                logger.error(f"Command error: {error_output}")
-                return False
+            # Check for route command errors
+            route_output = stdout.read().decode().strip()
+            route_error = stderr.read().decode().strip()
+            
+            logger.info(f"Route command output: {route_output}")
+            if route_error:
+                logger.error(f"Route command error: {route_error}")
+                
+                # Try alternative syntax without interface first
+                logger.info("Trying alternative route syntax...")
+                alt_route_cmd = f"set protocols static route6 {prefix_cidr} next-hop {cpe_link_local}"
+                logger.info(f"Executing alternative: {alt_route_cmd}")
+                stdin, stdout, stderr = self.ssh.exec_command(alt_route_cmd)
+                time.sleep(1)
+                
+                alt_output = stdout.read().decode().strip()
+                alt_error = stderr.read().decode().strip()
+                
+                if alt_error:
+                    logger.error(f"Alternative route command also failed: {alt_error}")
+                    return False
+                else:
+                    logger.info("Alternative route command succeeded")
+                    route_output = alt_output
+            
+            # Show current configuration changes before commit
+            logger.info("Showing configuration changes...")
+            stdin, stdout, stderr = self.ssh.exec_command("show configuration commands")
+            show_output = stdout.read().decode().strip()
+            show_error = stderr.read().decode().strip()
+            
+            if show_error:
+                logger.error(f"Show config error: {show_error}")
+            else:
+                logger.info(f"Current config changes:\n{show_output}")
             
             # Commit and save
             logger.info("Committing configuration")
             stdin, stdout, stderr = self.ssh.exec_command("commit")
-            time.sleep(2)
+            time.sleep(3)
             
             # Check commit output
             commit_output = stdout.read().decode().strip()
             commit_error = stderr.read().decode().strip()
             
+            logger.info(f"Commit output: {commit_output}")
             if commit_error:
                 logger.error(f"Commit error: {commit_error}")
+                logger.error("Attempting to discard changes and exit...")
+                stdin, stdout, stderr = self.ssh.exec_command("exit discard")
                 return False
             
             logger.info("Saving configuration")
             stdin, stdout, stderr = self.ssh.exec_command("save")
+            time.sleep(1)
             
             # Exit configuration mode
             stdin, stdout, stderr = self.ssh.exec_command("exit")
