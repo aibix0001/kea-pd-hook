@@ -25,8 +25,6 @@ class LogPrefixDataScript(Script):
 
         # Log prefix information
         self.log_info(f"Prefix: {prefix.prefix}")
-        for key, value in prefix.items():
-            self.log_info(f"{key}: {value}")
 
         # Log custom fields
         custom_data = getattr(prefix, "_custom_field_data", {})
