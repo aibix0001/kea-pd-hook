@@ -26,12 +26,21 @@ class LogPrefixDataScript(Script):
         # Log basic prefix information
         self.log_info(f"Prefix: {prefix.prefix}")
         self.log_info(f"Prefix Length: /{prefix.prefix_length}")
+        self.log_info(f"Family: {prefix.family.label} ({prefix.family.value})")
         self.log_info(f"Status: {prefix.status}")
-        self.log_info(f"Role: {prefix.role}")
-        self.log_info(f"Site: {prefix.site}")
-        self.log_info(f"VLAN: {prefix.vlan}")
-        self.log_info(f"VRF: {prefix.vrf}")
+        self.log_info(f"Role: {prefix.role.name if prefix.role else None}")
+        self.log_info(f"Type: {prefix.type}")
+        self.log_info(f"Site: {prefix.site.name if prefix.site else None}")
+        self.log_info(
+            f"VLAN: {prefix.vlan.name if prefix.vlan else None} ({prefix.vlan.vid if prefix.vlan else None})"
+        )
+        self.log_info(f"VRF: {prefix.vrf.name if prefix.vrf else None}")
+        self.log_info(f"Tenant: {prefix.tenant.name if prefix.tenant else None}")
         self.log_info(f"Description: {prefix.description}")
+
+        # Log tags if any
+        if prefix.tags.exists():
+            self.log_info(f"Tags: {', '.join(tag.name for tag in prefix.tags.all())}")
 
         # Log custom fields if any
         if prefix.custom_fields:
@@ -44,11 +53,6 @@ class LogPrefixDataScript(Script):
             self.log_info(f"IP Addresses: {prefix.ip_addresses.count()}")
             for ip in prefix.ip_addresses.all()[:5]:  # Limit to first 5
                 self.log_info(f"  - {ip.address}")
-
-        if prefix.vlans.exists():
-            self.log_info(f"VLANs: {prefix.vlans.count()}")
-            for vlan in prefix.vlans.all()[:5]:
-                self.log_info(f"  - {vlan.name} ({vlan.vid})")
 
         # Log timestamps
         self.log_info(f"Created: {prefix.created}")
