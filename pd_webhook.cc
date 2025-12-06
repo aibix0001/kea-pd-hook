@@ -31,6 +31,7 @@ struct PdAssignmentData {
     uint32_t iaid;                   // Identity association ID
     std::string cpe_link_local;      // CPE's link-local address
     std::string router_ip;           // Router's IP address
+    std::string router_link_addr;    // Router's link-address from relay packet
 };
 
 // Simple runtime configuration for this library.
@@ -199,11 +200,15 @@ updatePrefix(int prefix_id, const PdAssignmentData& data, uint32_t valid_lft, ui
     payload << "\"dhcpv6_iaid\":" << data.iaid << ",";
     payload << "\"dhcpv6_cpe_link_local\":\"" << data.cpe_link_local << "\",";
     payload << "\"dhcpv6_router_ip\":\"" << data.router_ip << "\",";
+    payload << "\"dhcpv6_router_link_addr\":\"" << data.router_link_addr << "\",";
     payload << "\"dhcpv6_leasetime\":" << expires_at;
     payload << "}";
     payload << "}";
     
-    std::string response = netboxHttpRequest("PATCH", endpoint, payload.str());
+    std::string payload_str = payload.str();
+    DEBUG_LOG("PD_WEBHOOK: updatePrefix payload: " << payload_str);
+    
+    std::string response = netboxHttpRequest("PATCH", endpoint, payload_str);
     
     if (response.empty()) {
         return false;
@@ -234,11 +239,15 @@ createPrefix(const PdAssignmentData& data, uint32_t valid_lft, uint32_t preferre
     payload << "\"dhcpv6_iaid\":" << data.iaid << ",";
     payload << "\"dhcpv6_cpe_link_local\":\"" << data.cpe_link_local << "\",";
     payload << "\"dhcpv6_router_ip\":\"" << data.router_ip << "\",";
+    payload << "\"dhcpv6_router_link_addr\":\"" << data.router_link_addr << "\",";
     payload << "\"dhcpv6_leasetime\":" << expires_at;
     payload << "}";
     payload << "}";
     
-    std::string response = netboxHttpRequest("POST", "ipam/prefixes/", payload.str());
+    std::string payload_str = payload.str();
+    DEBUG_LOG("PD_WEBHOOK: createPrefix payload: " << payload_str);
+    
+    std::string response = netboxHttpRequest("POST", "ipam/prefixes/", payload_str);
     
     if (response.empty()) {
         return false;
@@ -564,9 +573,171 @@ extractRouterIp(const Pkt6Ptr& query) {
     return "unknown";
 }
 
+// Extract router's link-address from relay packet (16:31 offset)
+static std::string
+extractRouterLinkAddr(const Pkt6Ptr& query) {
+    std::cout << "PD_WEBHOOK: >>> extractRouterLinkAddr() called" << std::endl;
+    DEBUG_LOG("PD_WEBHOOK: >>> extractRouterLinkAddr() called");
+    
+    if (!query) {
+        std::cout << "PD_WEBHOOK: query is null, returning 'unknown'" << std::endl;
+        DEBUG_LOG("PD_WEBHOOK: query is null, returning 'unknown'");
+        return "unknown";
+    }
+    
+    DEBUG_LOG("PD_WEBHOOK: query->relay_info_.size() = " << query->relay_info_.size());
+    
+    // Check if Kea has stored relay information for this packet
+    try {
+        if (query->relay_info_.size() > 0) {
+            DEBUG_LOG("PD_WEBHOOK: Found " << query->relay_info_.size() << " relay info entries");
+            
+            const auto& relay = query->relay_info_[0];
+            
+                // Try to access link_addr_ field from RelayInfo structure
+                // Use pattern-based search similar to peer-address extraction
+                try {
+                    const uint8_t* relay_bytes = reinterpret_cast<const uint8_t*>(&relay);
+                    
+                    DEBUG_LOG("PD_WEBHOOK: Searching for router link-address pattern in RelayInfo structure");
+                    
+                    // Look for global unicast IPv6 addresses (not starting with fe80 or ff)
+                    // Router link-address should be a global address, typically starting with 2xxx
+                    for (size_t i = 0; i < sizeof(relay) - 1; i++) {
+                        // Look for patterns that could be global unicast addresses
+                        // Global unicast addresses start with 2xxx or 3xxx in hex
+                        if ((relay_bytes[i] == 0x20 || relay_bytes[i] == 0x30 || relay_bytes[i] == 0x2) && 
+                            i + 16 <= sizeof(relay)) {
+                            
+                            // Skip if this looks like the peer-address (fe80 pattern nearby)
+                            bool is_near_fe80 = false;
+                            for (int check = -10; check <= 10; check++) {
+                                if (i + check >= 0 && i + check + 1 < sizeof(relay)) {
+                                    if (relay_bytes[i + check] == 0xfe && relay_bytes[i + check + 1] == 0x80) {
+                                        is_near_fe80 = true;
+                                        break;
+                                    }
+                                }
+                            }
+                            
+                            if (is_near_fe80) {
+                                continue; // Skip, this is probably near the peer-address
+                            }
+                            
+                            // Extract potential IPv6 address
+                            std::ostringstream addr_stream;
+                            addr_stream << std::hex << std::setfill('0');
+                            
+                            for (int j = 0; j < 16; j++) {
+                                if (j == 0) {
+                                    addr_stream << std::hex << static_cast<unsigned int>(relay_bytes[i + j]);
+                                } else if (j % 2 == 0) {
+                                    addr_stream << ":" << std::setw(2) << static_cast<unsigned int>(relay_bytes[i + j]);
+                                } else {
+                                    addr_stream << std::setw(2) << static_cast<unsigned int>(relay_bytes[i + j]);
+                                }
+                            }
+                            
+                            std::string extracted_addr = addr_stream.str();
+                            DEBUG_LOG("PD_WEBHOOK: Found potential router link-address at offset " << i << ": " << extracted_addr);
+                            
+                            // Validate and format the address
+                            try {
+                                isc::asiolink::IOAddress addr(extracted_addr);
+                                std::string formatted_addr = addr.toText();
+                                
+                                // Only accept global unicast addresses (not link-local, multicast, or unspecified)
+                                if (formatted_addr.find("fe80::") != 0 && 
+                                    formatted_addr != "::" && 
+                                    formatted_addr.find("ff") != 0 &&
+                                    formatted_addr.find("2001:") == 0) { // Look for 2001:/32 addresses
+                                    DEBUG_LOG("PD_WEBHOOK: Using router link-address: " << formatted_addr);
+                                    return formatted_addr;
+                                }
+                            } catch (...) {
+                                // Invalid address, continue searching
+                            }
+                        }
+                    }
+                
+                // Alternative approach: try to extract from RELAY_MSG option
+                OptionPtr relay_msg_opt = query->getOption(D6O_RELAY_MSG);
+                if (relay_msg_opt) {
+                    DEBUG_LOG("PD_WEBHOOK: Found RELAY_MSG option, extracting link-address");
+                    
+                    const std::vector<uint8_t>& relay_data = relay_msg_opt->getData();
+                    DEBUG_LOG("PD_WEBHOOK: RELAY_MSG data size: " << relay_data.size());
+                    
+                    if (relay_data.size() >= 34) { // Minimum size for link-address extraction (16+16)
+                        // Extract link-address (bytes 16-31 in relay message header)
+                        std::ostringstream link_addr_stream;
+                        link_addr_stream << std::hex << std::setfill('0');
+                        
+                        for (int i = 16; i < 32; i++) {
+                            if (i == 16) {
+                                link_addr_stream << std::hex << static_cast<unsigned int>(relay_data[i]);
+                            } else if (i % 2 == 0) {
+                                link_addr_stream << ":" << std::setw(2) << static_cast<unsigned int>(relay_data[i]);
+                            } else {
+                                link_addr_stream << std::setw(2) << static_cast<unsigned int>(relay_data[i]);
+                            }
+                        }
+                        
+                        std::string link_address = link_addr_stream.str();
+                        DEBUG_LOG("PD_WEBHOOK: Extracted link-address from RELAY_MSG: " << link_address);
+                        
+                        // Validate and format the address
+                        try {
+                            isc::asiolink::IOAddress addr(link_address);
+                            std::string formatted_addr = addr.toText();
+                            
+                            // Skip link-local addresses (those are usually CPE addresses)
+                            if (formatted_addr.find("fe80::") != 0 && 
+                                formatted_addr != "::" && 
+                                formatted_addr.find("ff") != 0) {
+                                DEBUG_LOG("PD_WEBHOOK: Using router link-address from RELAY_MSG: " << formatted_addr);
+                                return formatted_addr;
+                            }
+                        } catch (...) {
+                            DEBUG_LOG("PD_WEBHOOK: Failed to parse link-address from RELAY_MSG");
+                        }
+                    }
+                }
+                
+            } catch (...) {
+                DEBUG_LOG("PD_WEBHOOK: Failed to extract link-address from RelayInfo");
+            }
+        }
+    } catch (...) {
+        DEBUG_LOG("PD_WEBHOOK: Failed to access relay_info for link-address extraction");
+    }
+    
+    // Log packet addresses for debugging
+    if (!query->getLocalAddr().isV6Zero()) {
+        DEBUG_LOG("PD_WEBHOOK: Packet local address: " << query->getLocalAddr().toText());
+    }
+    if (!query->getRemoteAddr().isV6Zero()) {
+        DEBUG_LOG("PD_WEBHOOK: Packet remote address: " << query->getRemoteAddr().toText());
+    }
+    
+    // Fallback: try to use packet's local address (might be router address)
+    if (!query->getLocalAddr().isV6Zero()) {
+        std::string local_addr = query->getLocalAddr().toText();
+        if (local_addr.find("fe80::") != 0 && local_addr != "::") {
+            DEBUG_LOG("PD_WEBHOOK: Using packet local address as router link-address: " << local_addr);
+            return local_addr;
+        }
+    }
+    
+    DEBUG_LOG("PD_WEBHOOK: Could not extract router link-address, returning 'unknown'");
+    return "unknown";
+}
+
 // Build assignment data structure from lease and packet
 static PdAssignmentData
 buildAssignmentData(const Pkt6Ptr& query, const Lease6Ptr& lease) {
+    std::cout << "PD_WEBHOOK: >>> buildAssignmentData() called" << std::endl;
+    DEBUG_LOG("PD_WEBHOOK: >>> buildAssignmentData() called");
     PdAssignmentData data;
     
     data.client_duid = extractClientDuid(query);
@@ -575,6 +746,9 @@ buildAssignmentData(const Pkt6Ptr& query, const Lease6Ptr& lease) {
     data.iaid = lease->iaid_;
     data.cpe_link_local = extractCpeLinkLocal(query);
     data.router_ip = extractRouterIp(query);
+    data.router_link_addr = extractRouterLinkAddr(query);
+    
+    DEBUG_LOG("PD_WEBHOOK: buildAssignmentData - router_link_addr = '" << data.router_link_addr << "'");
     
     return data;
 }
@@ -693,6 +867,7 @@ lease6_renew(CalloutHandle& handle) {
                   << "/" << static_cast<int>(lease6->prefixlen_));
 
         // Build assignment data
+        DEBUG_LOG("PD_WEBHOOK: About to call buildAssignmentData for lease renewal");
         PdAssignmentData data = buildAssignmentData(query6, lease6);
         
         // Update NetBox with new lease expiration time
