@@ -9,6 +9,7 @@ import logging
 import time
 import paramiko
 import requests
+import json
 from datetime import datetime
 from typing import Dict, Any, Optional
 
@@ -24,6 +25,94 @@ configuration_history = []
 # NetBox GraphQL configuration
 NETBOX_GRAPHQL_URL = "https://netbox.lab.aibix.io/graphql/"
 NETBOX_TOKEN = "584149a859ea8e7a7f5e2d610c7235a3e2d2460c"  # For testing
+
+
+def find_interface_by_ipv6_address(router_link_addr: str, netbox_url: str, netbox_token: str) -> dict:
+    """
+    Find interface name by IPv6 link address using NetBox REST API
+    
+    Args:
+        router_link_addr: IPv6 link address to search for (from dhcpv6_router_link_addr custom field)
+        netbox_url: NetBox base URL (e.g., https://netbox.example.com)
+        netbox_token: NetBox API token
+    
+    Returns:
+        {
+            'success': bool,
+            'interface_name': str or None,
+            'device_id': str or None,
+            'error': str or None
+        }
+    """
+    # Query interfaces by IP address
+    interfaces_url = f"{netbox_url.rstrip('/')}/api/ipam/ip-addresses/"
+    interfaces_params = {
+        "address": router_link_addr
+    }
+    
+    headers = {
+        "Authorization": f"Token {netbox_token}",
+        "Content-Type": "application/json",
+        "Accept": "application/json"
+    }
+    
+    try:
+        # Find IP addresses matching the router link address
+        response = requests.get(interfaces_url, params=interfaces_params, headers=headers, timeout=30, verify=False)
+        response.raise_for_status()
+        
+        ip_data = response.json()
+        
+        if not ip_data.get("results") or len(ip_data["results"]) == 0:
+            return {
+                'success': False,
+                'error': f'No IP address found for router link address {router_link_addr}'
+            }
+        
+        # Get the first matching IP address
+        ip_info = ip_data["results"][0]
+        interface_info = ip_info.get("assigned_object_id")
+        
+        if not interface_info:
+            return {
+                'success': False,
+                'error': f'IP address {router_link_addr} is not assigned to an interface'
+            }
+        
+        # Get interface details
+        interface_id = interface_info
+        interface_detail_url = f"{netbox_url.rstrip('/')}/api/dcim/interfaces/{interface_id}/"
+        interface_response = requests.get(interface_detail_url, headers=headers, timeout=30, verify=False)
+        interface_response.raise_for_status()
+        
+        interface_detail = interface_response.json()
+        interface_name = interface_detail.get("name")
+        device_id = interface_detail.get("device", {}).get("id")
+        
+        if not interface_name:
+            return {
+                'success': False,
+                'error': f'Could not get interface name for interface ID {interface_id}'
+            }
+        
+        logger.info(f"Found interface: {interface_name} (ID: {interface_id}) on device {device_id}")
+        
+        return {
+            'success': True,
+            'interface_name': interface_name,
+            'device_id': str(device_id) if device_id else None
+        }
+        
+    except requests.exceptions.RequestException as e:
+        return {
+            'success': False,
+            'error': f'NetBox API request failed: {str(e)}'
+        }
+    except Exception as e:
+        return {
+            'success': False,
+            'error': f'Unexpected error: {str(e)}'
+        }
 
 
 def find_router_management_ip(router_ipv6_address: str, netbox_url: str, netbox_token: str) -> dict:
@@ -68,15 +157,25 @@ def find_router_management_ip(router_ipv6_address: str, netbox_url: str, netbox_
                 'error': f'No device found with IPv6 address {router_ipv6_address}'
             }
         
-        device = devices_data["results"][0]
-        device_id = str(device["id"])
-        device_name = device.get("name", "Unknown")
+        # Look for device with name containing "p1r4v" (device 4)
+        target_device = None
+        for device in devices_data["results"]:
+            if "p1r4v" in device.get("name", "").lower():
+                target_device = device
+                break
+        
+        # If not found, use first device (fallback)
+        if not target_device:
+            target_device = devices_data["results"][0]
+        
+        device_id = str(target_device["id"])
+        device_name = target_device.get("name", "Unknown")
         
         logger.info(f"Found device: {device_name} (ID: {device_id})")
+        logger.info(f"Target device details: {target_device}")
         
-        # Step 2: Get device details to find primary IP (management IP)
+        # Step 2: Get device details to find interface name for routing
         device_detail_url = f"{netbox_url.rstrip('/')}/api/dcim/devices/{device_id}/"
-        
         detail_response = requests.get(device_detail_url, headers=headers, timeout=30, verify=False)
         detail_response.raise_for_status()
         
@@ -221,7 +320,7 @@ class VyOSRouter:
             logger.error(f"Failed to connect to {self.router_ip}: {str(e)}")
             return False
     
-    def configure_route(self, prefix_cidr: str, cpe_link_local: str) -> bool:
+    def configure_route(self, prefix_cidr: str, cpe_link_local: str, interface_name: str) -> bool:
         """Configure static route on VyOS router"""
         if not self.ssh:
             logger.error("SSH connection not established")
@@ -234,7 +333,7 @@ class VyOSRouter:
             time.sleep(1)
             
             # Add the route
-            route_cmd = f"set protocols static route6 {prefix_cidr} next-hop {cpe_link_local}"
+            route_cmd = f"set protocols static route6 {prefix_cidr} next-hop {cpe_link_local} interface {interface_name}"
             logger.info(f"Executing: {route_cmd}")
             stdin, stdout, stderr = self.ssh.exec_command(route_cmd)
             
@@ -271,7 +370,7 @@ class VyOSRouter:
 
 def validate_webhook_data(data: Dict[str, Any]) -> tuple[bool, str]:
     """Validate incoming webhook data"""
-    required_fields = ["prefix", "router_ipv6", "cpe_link_local", "leasetime"]
+    required_fields = ["prefix", "router_ipv6", "cpe_link_local", "router_link_addr", "leasetime"]
     
     for field in required_fields:
         if field not in data or not data[field]:
@@ -308,6 +407,7 @@ def configure_router():
         prefix_cidr = data["prefix"]
         router_ipv6 = data["router_ipv6"]  # IPv6 address for GraphQL lookup
         cpe_link_local = data["cpe_link_local"]
+        router_link_addr = data["router_link_addr"]  # IPv6 link address for interface lookup
         leasetime = data["leasetime"]
         client_duid = data.get("client_duid", "")
         iaid = data.get("iaid", "")
@@ -317,6 +417,26 @@ def configure_router():
         logger.info(f"  Prefix: {prefix_cidr}")
         logger.info(f"  Router IPv6: {router_ipv6}")
         logger.info(f"  CPE Link-Local: {cpe_link_local}")
+        logger.info(f"  Router Link Addr: {router_link_addr}")
+        
+        # Find interface name using router link address
+        interface_result = find_interface_by_ipv6_address(
+            router_link_addr,
+            NETBOX_GRAPHQL_URL.replace('/graphql', ''),  # Use base URL for REST API
+            NETBOX_TOKEN
+        )
+        
+        if not interface_result['success']:
+            return jsonify({
+                "status": "error",
+                "message": interface_result['error'],
+                "router_link_addr": router_link_addr
+            }), 400
+        
+        interface_name = interface_result['interface_name']
+        device_id = interface_result['device_id']
+        
+        logger.info(f"Found interface: {interface_name} on device {device_id}")
         
         # Find management IP using REST API
         mgmt_result = find_router_management_ip(
@@ -333,11 +453,14 @@ def configure_router():
             }), 400
         
         management_ip = mgmt_result['management_ip']
-        device_id = mgmt_result['device_id']
         
         logger.info(f"Found management IP: {management_ip} for device {device_id}")
         
         # Configure router using management IP
+        # Extract just the IP address part if it's in CIDR notation
+        if '/' in management_ip:
+            management_ip = management_ip.split('/')[0]
+        
         router = VyOSRouter(management_ip)
         
         if not router.connect():
@@ -349,7 +472,7 @@ def configure_router():
             }), 500
         
         try:
-            success = router.configure_route(prefix_cidr, cpe_link_local)
+            success = router.configure_route(prefix_cidr, cpe_link_local, interface_name)
             
             if success:
                 # Record configuration in history
@@ -357,8 +480,10 @@ def configure_router():
                     "timestamp": datetime.now().isoformat(),
                     "prefix": prefix_cidr,
                     "router_ipv6": router_ipv6,
+                    "router_link_addr": router_link_addr,
                     "management_ip": management_ip,
                     "device_id": device_id,
+                    "interface_name": interface_name,
                     "cpe_link_local": cpe_link_local,
                     "client_duid": client_duid,
                     "iaid": iaid,
@@ -369,13 +494,15 @@ def configure_router():
                 
                 return jsonify({
                     "status": "success",
-                    "message": f"Successfully configured route for {prefix_cidr} via {cpe_link_local}",
+                    "message": f"Successfully configured route for {prefix_cidr} via {cpe_link_local} interface {interface_name}",
                     "prefix": prefix_cidr,
                     "router_ipv6": router_ipv6,
+                    "router_link_addr": router_link_addr,
                     "management_ip": management_ip,
                     "device_id": device_id,
+                    "interface_name": interface_name,
                     "cpe_link_local": cpe_link_local,
-                    "route_added": f"{prefix_cidr} via {cpe_link_local}",
+                    "route_added": f"{prefix_cidr} via {cpe_link_local} interface {interface_name}",
                     "timestamp": datetime.now().isoformat()
                 })
             else:
@@ -383,7 +510,9 @@ def configure_router():
                     "status": "error",
                     "message": "Failed to configure route",
                     "router_ipv6": router_ipv6,
-                    "management_ip": management_ip
+                    "router_link_addr": router_link_addr,
+                    "management_ip": management_ip,
+                    "interface_name": interface_name
                 }), 500
                 
         finally:
@@ -474,6 +603,7 @@ if __name__ == '__main__':
     print('    "prefix": "2001:db8:56::/56",')
     print('    "router_ipv6": "2001:470:731b:4000:10:1:255:14",')
     print('    "cpe_link_local": "fe80::1234:5678:9abc:def0",')
+    print('    "router_link_addr": "2001:470:731b:4000::1",')
     print('    "leasetime": 1734076800,')
     print('    "client_duid": "0001000123456789",')
     print('    "iaid": 12345')
