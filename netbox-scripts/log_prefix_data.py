@@ -27,8 +27,9 @@ class LogPrefixDataScript(Script):
         self.log_info(f"Prefix: {prefix.prefix}")
 
         # Log custom fields
-        self.log_info("Custom Fields:")
-        for key, value in prefix.custom_fields.items():
-            self.log_info(f"  {key}: {value}")
+        if prefix.custom_fields.exists():
+            self.log_info("Custom Fields:")
+            for cf in prefix.custom_fields.all():
+                self.log_info(f"  {cf.field.name}: {cf.value}")
 
         return f"Successfully logged data for prefix {prefix.prefix}"
