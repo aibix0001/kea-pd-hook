@@ -27,7 +27,7 @@ def test_router_configuration():
     
     payload = {
         "prefix": "2001:db8:56::/56",
-        "router_ip": "192.168.1.100",  # Test IP - change to actual router
+        "router_ipv6": "2001:470:731b:4000:10:1:255:14",  # IPv6 address for GraphQL lookup
         "cpe_link_local": "fe80::1234:5678:9abc:def0",
         "leasetime": future_timestamp,
         "client_duid": "0001000123456789",
@@ -56,7 +56,7 @@ def test_expired_lease():
     
     payload = {
         "prefix": "2001:db8:57::/56",
-        "router_ip": "192.168.1.100",
+        "router_ipv6": "2001:470:731b:4000:10:1:255:15",
         "cpe_link_local": "fe80::1234:5678:9abc:def1",
         "leasetime": past_timestamp,
         "client_duid": "0001000123456789",
@@ -80,7 +80,7 @@ def test_invalid_payload():
     # Missing required fields
     payload = {
         "prefix": "2001:db8:58::/56",
-        "router_ip": "192.168.1.100"
+        "router_ipv6": "2001:470:731b:4000:10:1:255:14"
         # Missing cpe_link_local and leasetime
     }
     
