@@ -21,7 +21,7 @@ class ExtractPrefixDataWebhookScript(Script):
 
     def run(self, data, commit):
         prefix_data = data["prefix"]
-        webhook_url = data.get("webhook_url", "http://localhost:5000/configure-router")
+        webhook_url = data.get("webhook_url", "http://192.168.10.76:5000/configure-router")
 
         # Handle case where prefix is passed as string (e.g., via API)
         if isinstance(prefix_data, str):
