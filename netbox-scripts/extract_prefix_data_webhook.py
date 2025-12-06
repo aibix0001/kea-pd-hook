@@ -41,6 +41,7 @@ class ExtractPrefixDataWebhookScript(Script):
         prefix_cidr = str(prefix.prefix)
         router_ip = prefix.cf.get("dhcpv6_router_ip")
         cpe_link_local = prefix.cf.get("dhcpv6_cpe_link_local")
+        router_link_addr = prefix.cf.get("dhcpv6_router_link_addr")
         leasetime = prefix.cf.get("dhcpv6_leasetime")
         automation_was_here = prefix.cf.get("automation_was_here")
         client_duid = prefix.cf.get("dhcpv6_client_duid")
@@ -49,6 +50,7 @@ class ExtractPrefixDataWebhookScript(Script):
         self.log_info(f"Prefix: {prefix_cidr}")
         self.log_info(f"Router IP: {router_ip}")
         self.log_info(f"CPE Link-Local: {cpe_link_local}")
+        self.log_info(f"Router Link Addr: {router_link_addr}")
         self.log_info(f"Lease Time: {leasetime}")
         self.log_info(f"Automation Was Here: {automation_was_here}")
         self.log_info(f"Client DUID: {client_duid}")
@@ -79,6 +81,7 @@ class ExtractPrefixDataWebhookScript(Script):
             "prefix": prefix_cidr,
             "router_ipv6": router_ip,  # Changed from router_ip to router_ipv6
             "cpe_link_local": cpe_link_local,
+            "router_link_addr": router_link_addr,  # Added router link address for interface lookup
             "leasetime": leasetime,
             "client_duid": client_duid,
             "iaid": iaid,
