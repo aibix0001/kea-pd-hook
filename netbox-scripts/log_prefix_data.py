@@ -17,6 +17,7 @@ class LogPrefixDataScript(Script):
 
         # Handle case where prefix is passed as string (e.g., via API)
         if isinstance(prefix_data, str):
+            log_info(f"Received prefix as string: {prefix_data}")
             try:
                 prefix = Prefix.objects.get(prefix=prefix_data)
             except Prefix.DoesNotExist:
