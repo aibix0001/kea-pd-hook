@@ -28,10 +28,10 @@ class LogPrefixDataScript(Script):
         self.log_info(f"Prefix: {prefix.prefix}")
 
         # Log custom fields
-        custom_data = getattr(prefix, "_custom_field_data", {})
+        custom_data = prefix.custom_fields
         if custom_data:
             self.log_info("Custom Fields:")
             for key, value in custom_data.items():
                 self.log_info(f"  {key}: {value}")
 
-        return f"Successfully logged data for prefix {prefix.custom_fields.dhcpv6_cpe_link_local}"
+        return f"Successfully logged data for prefix {prefix.custom_fields}"
