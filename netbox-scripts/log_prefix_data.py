@@ -25,7 +25,6 @@ class LogPrefixDataScript(Script):
 
         # Log basic prefix information
         self.log_info(f"Prefix: {prefix.prefix}")
-        self.log_info(f"Network: {prefix.network}")
         self.log_info(f"Prefix Length: /{prefix.prefix_length}")
         self.log_info(f"Status: {prefix.status}")
         self.log_info(f"Role: {prefix.role}")
