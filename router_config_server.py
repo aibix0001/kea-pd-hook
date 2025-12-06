@@ -22,17 +22,17 @@ app = Flask(__name__)
 configuration_history = []
 
 # NetBox GraphQL configuration
-NETBOX_GRAPHQL_URL = "https://netbox.example.com/graphql/"
-NETBOX_TOKEN = "your-netbox-token-here"  # For testing
+NETBOX_GRAPHQL_URL = "https://netbox.lab.aibix.io/graphql/"
+NETBOX_TOKEN = "584149a859ea8e7a7f5e2d610c7235a3e2d2460c"  # For testing
 
 
 def find_router_management_ip(router_ipv6_address: str, netbox_url: str, netbox_token: str) -> dict:
     """
-    Find router management IP using GraphQL query
+    Find router management IP using NetBox REST API
     
     Args:
         router_ipv6_address: IPv6 address to search for (from dhcpv6_router_ip custom field)
-        netbox_url: NetBox GraphQL endpoint
+        netbox_url: NetBox base URL (e.g., https://netbox.example.com)
         netbox_token: NetBox API token
     
     Returns:
@@ -43,18 +43,81 @@ def find_router_management_ip(router_ipv6_address: str, netbox_url: str, netbox_
             'error': str or None
         }
     """
-    query = """
-    query FindRouterManagementIP($routerIpv6: String!) {
-      device_list(
-        filters: {interfaces: {ip_addresses: {address: {exact: $routerIpv6}}}
-      ) {
-        id
-        interfaces(filters: {vrf: {name: {exact: "MGMT"}}}) {
-          id
-          ip_addresses {
-            address
-            family
-          }
+    # Step 1: Find device by IPv6 address
+    devices_url = f"{netbox_url.rstrip('/')}/api/dcim/devices/"
+    devices_params = {
+        "interface_ip_address": router_ipv6_address
+    }
+    
+    headers = {
+        "Authorization": f"Token {netbox_token}",
+        "Content-Type": "application/json",
+        "Accept": "application/json"
+    }
+    
+    try:
+        # Find devices with the IPv6 address
+        response = requests.get(devices_url, params=devices_params, headers=headers, timeout=30, verify=False)
+        response.raise_for_status()
+        
+        devices_data = response.json()
+        
+        if not devices_data.get("results") or len(devices_data["results"]) == 0:
+            return {
+                'success': False,
+                'error': f'No device found with IPv6 address {router_ipv6_address}'
+            }
+        
+        device = devices_data["results"][0]
+        device_id = str(device["id"])
+        device_name = device.get("name", "Unknown")
+        
+        logger.info(f"Found device: {device_name} (ID: {device_id})")
+        
+        # Step 2: Get device details to find primary IP (management IP)
+        device_detail_url = f"{netbox_url.rstrip('/')}/api/dcim/devices/{device_id}/"
+        
+        detail_response = requests.get(device_detail_url, headers=headers, timeout=30, verify=False)
+        detail_response.raise_for_status()
+        
+        device_detail = detail_response.json()
+        
+        # Extract primary IP (this should be the management IP)
+        primary_ip = device_detail.get("primary_ip")
+        
+        if not primary_ip:
+            return {
+                'success': False,
+                'error': f'No primary IP found for device {device_name} (ID: {device_id})'
+            }
+        
+        management_ip = primary_ip.get("address") if isinstance(primary_ip, dict) else str(primary_ip)
+        
+        logger.info(f"Found management IP: {management_ip} for device {device_name}")
+        
+        return {
+            'success': True,
+            'management_ip': management_ip,
+            'device_id': device_id,
+            'device_name': device_name
+        }
+        
+    except requests.exceptions.RequestException as e:
+        return {
+            'success': False,
+            'error': f'NetBox API request failed: {str(e)}'
+        }
+    except Exception as e:
+        return {
+            'success': False,
+            'error': f'Unexpected error: {str(e)}'
+        }
+    """
+    headers = {
+        "Authorization": f"Token {netbox_token}",
+        "Content-Type": "application/json",
+        "Accept": "application/json"
+    }
         }
       }
     }
@@ -72,11 +135,17 @@ def find_router_management_ip(router_ipv6_address: str, netbox_url: str, netbox_
         "variables": variables
     }
     
+    # Debug: print the exact query being sent
+    logger.info(f"Sending GraphQL query: {query.strip()}")
+    
     try:
-        response = requests.post(netbox_url, json=payload, headers=headers, timeout=30)
+        response = requests.post(netbox_url, json=payload, headers=headers, timeout=30, verify=False)
         response.raise_for_status()
         
         data = response.json()
+        
+        # Debug: log the raw response
+        logger.info(f"Raw GraphQL response: {response.text}")
         
         # Parse response for management IP
         devices = data.get("data", {}).get("device_list", [])
@@ -249,10 +318,10 @@ def configure_router():
         logger.info(f"  Router IPv6: {router_ipv6}")
         logger.info(f"  CPE Link-Local: {cpe_link_local}")
         
-        # Find management IP using GraphQL
+        # Find management IP using REST API
         mgmt_result = find_router_management_ip(
             router_ipv6, 
-            NETBOX_GRAPHQL_URL, 
+            NETBOX_GRAPHQL_URL.replace('/graphql', ''),  # Use base URL for REST API
             NETBOX_TOKEN
         )
         
