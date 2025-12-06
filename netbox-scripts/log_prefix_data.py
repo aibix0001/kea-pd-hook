@@ -12,7 +12,16 @@ class LogPrefixDataScript(Script):
     )
 
     def run(self, data, commit):
-        prefix = data["prefix"]
+        prefix_data = data["prefix"]
+
+        # Handle case where prefix is passed as string (e.g., via API)
+        if isinstance(prefix_data, str):
+            try:
+                prefix = Prefix.objects.get(prefix=prefix_data)
+            except Prefix.DoesNotExist:
+                raise ValueError(f"Prefix '{prefix_data}' does not exist in NetBox")
+        else:
+            prefix = prefix_data
 
         # Log basic prefix information
         self.log_info(f"Prefix: {prefix.prefix}")
