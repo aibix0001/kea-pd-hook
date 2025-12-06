@@ -13,7 +13,6 @@ class LogPrefixDataScript(Script):
 
     def run(self, data, commit):
         prefix_data = data["prefix"]
-        self.log(f"Logging data for prefix: {prefix_data}")
 
         # Handle case where prefix is passed as string (e.g., via API)
         if isinstance(prefix_data, str):
@@ -36,4 +35,4 @@ class LogPrefixDataScript(Script):
             for key, value in custom_data.items():
                 self.log_info(f"  {key}: {value}")
 
-        return f"Successfully logged data for prefix {prefix.prefix}"
+        return f"Successfully logged data for prefix {prefix}"
