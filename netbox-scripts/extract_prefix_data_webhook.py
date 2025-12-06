@@ -124,7 +124,7 @@ class ExtractPrefixDataWebhookScript(Script):
             }
 
         except requests.exceptions.RequestException as e:
-            self.log_error(f"Failed to send webhook: {str(e)}")
+            self.log_warning(f"Failed to send webhook: {str(e)}")
             return {
                 "status": "webhook_failed",
                 "prefix": prefix_cidr,
