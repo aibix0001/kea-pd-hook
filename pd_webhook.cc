@@ -274,6 +274,18 @@ notifyPdAssigned(const Pkt6Ptr& query6,
             client_duid_hex = toHex(d);
         }
 
+        // Extract relay information for webhook
+        std::string link_addr = "";
+        std::string peer_addr = "";
+        if (!query6->relay_info_.empty()) {
+            const Pkt6::RelayInfo& relay = query6->relay_info_[0];
+            link_addr = relay.linkaddr_.toText();
+            peer_addr = relay.peeraddr_.toText();
+            DEBUG_LOG("PD_WEBHOOK: Found relay info - link_addr: " << link_addr << ", peer_addr: " << peer_addr);
+        } else {
+            DEBUG_LOG("PD_WEBHOOK: No relay information found (direct message)");
+        }
+
         // Build JSON manually. All fields we use are safe without escaping.
         std::ostringstream os;
         os << "{";
@@ -281,6 +293,8 @@ notifyPdAssigned(const Pkt6Ptr& query6,
         os << "\"msg_type\":" << static_cast<unsigned int>(query6->getType()) << ",";
         os << "\"reply_type\":" << static_cast<unsigned int>(response6->getType()) << ",";
         os << "\"client_duid\":\"" << client_duid_hex << "\",";
+        os << "\"link_addr\":\"" << link_addr << "\",";
+        os << "\"peer_addr\":\"" << peer_addr << "\",";
         os << "\"leases\":[";
 
         bool first = true;
