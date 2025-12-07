@@ -277,11 +277,14 @@ notifyPdAssigned(const Pkt6Ptr& query6,
         // Extract relay information for webhook
         std::string link_addr = "";
         std::string peer_addr = "";
+        std::string relay_src_addr = "";
         if (!query6->relay_info_.empty()) {
             const Pkt6::RelayInfo& relay = query6->relay_info_[0];
             link_addr = relay.linkaddr_.toText();
             peer_addr = relay.peeraddr_.toText();
-            DEBUG_LOG("PD_WEBHOOK: Found relay info - link_addr: " << link_addr << ", peer_addr: " << peer_addr);
+            // Get the actual source address of the relay packet (relay agent's IP)
+            relay_src_addr = query6->getRemoteAddr().toText();
+            DEBUG_LOG("PD_WEBHOOK: Found relay info - link_addr: " << link_addr << ", peer_addr: " << peer_addr << ", relay_src_addr: " << relay_src_addr);
         } else {
             DEBUG_LOG("PD_WEBHOOK: No relay information found (direct message)");
         }
@@ -295,6 +298,7 @@ notifyPdAssigned(const Pkt6Ptr& query6,
         os << "\"client_duid\":\"" << client_duid_hex << "\",";
         os << "\"link_addr\":\"" << link_addr << "\",";
         os << "\"peer_addr\":\"" << peer_addr << "\",";
+        os << "\"relay_src_addr\":\"" << relay_src_addr << "\",";
         os << "\"leases\":[";
 
         bool first = true;
