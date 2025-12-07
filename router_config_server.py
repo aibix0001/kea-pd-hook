@@ -8,10 +8,13 @@ from flask import Flask, request, jsonify
 import logging
 import time
 import paramiko
+import logging
+import time
 import requests
 import json
 from datetime import datetime
 from typing import Dict, Any, Optional
+from netmiko import ConnectHandler
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -299,207 +302,105 @@ def find_router_management_ip(router_ipv6_address: str, netbox_url: str, netbox_
 
 class VyOSRouter:
     """VyOS router configuration handler"""
-    
+
     def __init__(self, router_ip: str, username: str = "vyos", timeout: int = 10):
         self.router_ip = router_ip
         self.username = username
         self.timeout = timeout
-        self.ssh = None
+        self.net_connect = None
     
     def connect(self) -> bool:
-        """Connect to VyOS router via SSH"""
+        """Connect to VyOS router via SSH using Netmiko"""
         try:
-            self.ssh = paramiko.SSHClient()
-            self.ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-            
+            vyos_device = {
+                "device_type": "vyos",
+                "host": self.router_ip,
+                "username": self.username,
+                "use_keys": True,
+                "key_file": "~/.ssh/id_ed25519",
+                "timeout": self.timeout,
+            }
+
             logger.info(f"Connecting to VyOS router at {self.router_ip}")
-            self.ssh.connect(self.router_ip, username=self.username, timeout=self.timeout)
-            
-            # Check current mode and get basic info
-            logger.info("Checking router status...")
-            stdin, stdout, stderr = self.ssh.exec_command("show version")
-            version_output = stdout.read().decode().strip()
-            if version_output:
-                logger.info(f"VyOS version: {version_output}")
-            
-            # Check if we're already in configuration mode
-            stdin, stdout, stderr = self.ssh.exec_command("show configuration commands | head -3")
-            config_sample = stdout.read().decode().strip()
-            if config_sample and not config_sample.startswith("Invalid command"):
-                logger.info(f"Router appears to be in configuration mode")
-                logger.info(f"Sample config: {config_sample}")
+            self.net_connect = ConnectHandler(**vyos_device)
+
+            # Test connection with a simple command
+            logger.info("Testing connection...")
+            output = self.net_connect.send_command("show version | head -1")
+            if output:
+                logger.info(f"Connected successfully. VyOS version info: {output}")
+                return True
             else:
-                logger.info("Router is in operational mode")
-            
-            return True
-            
+                logger.error("Failed to get version info")
+                return False
+
         except Exception as e:
             logger.error(f"Failed to connect to {self.router_ip}: {str(e)}")
             return False
     
     def verify_route(self, prefix_cidr: str, cpe_link_local: str, interface_name: str) -> bool:
         """Verify that route was successfully configured"""
-        if not self.ssh:
+        if not self.net_connect:
             logger.error("SSH connection not established for verification")
             return False
-            
+
         try:
-            # Show configuration commands to verify route exists
+            # Check configuration commands
             verify_cmd = f"show configuration commands | match 'set protocols static route6 {prefix_cidr}'"
-            logger.info(f"Verifying route with: {verify_cmd}")
-            stdin, stdout, stderr = self.ssh.exec_command(verify_cmd)
-            
-            output = stdout.read().decode().strip()
-            error_output = stderr.read().decode().strip()
-            
-            if error_output:
-                logger.error(f"Verification command error: {error_output}")
-                return False
-            
-            # Check if route configuration exists in output
+            logger.info(f"Verifying route configuration with: {verify_cmd}")
+
+            output = self.net_connect.send_command(verify_cmd)
+            logger.info(f"Configuration check output: '{output}'")
+
+            # Check if route configuration exists
             expected_route = f"set protocols static route6 {prefix_cidr} next-hop {cpe_link_local} interface {interface_name}"
-            
-            if expected_route in output:
-                logger.info(f"✅ Route verification successful: {expected_route}")
+            alt_expected_route = f"set protocols static route6 {prefix_cidr} next-hop {cpe_link_local}"
+
+            if expected_route in output or alt_expected_route in output:
+                logger.info(f"✅ Route configuration verified: route found in config commands")
                 return True
             else:
-                logger.error(f"❌ Route verification failed. Expected: {expected_route}")
-                logger.error(f"❌ Actual output: {output}")
+                logger.error(f"❌ Route not found in configuration commands")
+                logger.error(f"Expected: '{expected_route}' or '{alt_expected_route}'")
                 return False
-                
-        except Exception as e:
-            logger.error(f"Failed to verify route: {str(e)}")
-            return False
-            
-            # Check if the route configuration exists in output
-            expected_route = f"set protocols static route6 {prefix_cidr} next-hop {cpe_link_local} interface {interface_name}"
-            
-            if expected_route in output:
-                logger.info(f"✅ Route verification successful: {expected_route}")
-                return True
-            else:
-                logger.error(f"❌ Route verification failed. Expected: {expected_route}")
-                logger.error(f"❌ Actual output: {output}")
-                return False
-                
+
         except Exception as e:
             logger.error(f"Failed to verify route: {str(e)}")
             return False
 
     def configure_route(self, prefix_cidr: str, cpe_link_local: str, interface_name: str) -> bool:
-        """Configure static route on VyOS router"""
-        if not self.ssh:
+        """Configure static route on VyOS router using Netmiko"""
+        if not self.net_connect:
             logger.error("SSH connection not established")
             return False
-        
+
         try:
-            # Check current mode and handle different VyOS modes
-            logger.info("Checking current router mode...")
-            stdin, stdout, stderr = self.ssh.exec_command("show configuration commands | head -1")
-            mode_output = stdout.read().decode().strip()
-            mode_error = stderr.read().decode().strip()
-            
-            if mode_error or "Invalid command" in mode_output:
-                # We're in operational mode, need to enter configure
-                logger.info("Router is in operational mode, entering configuration mode")
-                stdin, stdout, stderr = self.ssh.exec_command("configure")
-                time.sleep(2)
-                
-                # Check if we successfully entered configuration mode
-                config_output = stdout.read().decode().strip()
-                config_error = stderr.read().decode().strip()
-                logger.info(f"Configure mode output: {config_output}")
-                if config_error:
-                    logger.error(f"Configure mode error: {config_error}")
-                    return False
-            else:
-                logger.info("Router appears to be in configuration or build mode")
-                logger.info(f"Current mode output: {mode_output}")
-                
-                # Try to exit build mode and enter configuration mode
-                logger.info("Attempting to exit current mode and enter configuration mode...")
-                stdin, stdout, stderr = self.ssh.exec_command("exit")
-                time.sleep(1)
-                
-                # Now try to enter configuration mode
-                stdin, stdout, stderr = self.ssh.exec_command("configure")
-                time.sleep(2)
-                
-                # Check if we successfully entered configuration mode
-                config_output = stdout.read().decode().strip()
-                config_error = stderr.read().decode().strip()
-                logger.info(f"Configure mode output: {config_output}")
-                if config_error:
-                    logger.error(f"Configure mode error after exit: {config_error}")
-                    return False
-            
-            # Add the route - try different syntax variations
-            route_cmd = f"set protocols static route6 {prefix_cidr} next-hop {cpe_link_local} interface {interface_name}"
-            logger.info(f"Executing: {route_cmd}")
-            stdin, stdout, stderr = self.ssh.exec_command(route_cmd)
-            time.sleep(1)
-            
-            # Check for route command errors
-            route_output = stdout.read().decode().strip()
-            route_error = stderr.read().decode().strip()
-            
-            logger.info(f"Route command output: {route_output}")
-            if route_error:
-                logger.error(f"Route command error: {route_error}")
-                
-                # Try alternative syntax without interface first
-                logger.info("Trying alternative route syntax...")
-                alt_route_cmd = f"set protocols static route6 {prefix_cidr} next-hop {cpe_link_local}"
-                logger.info(f"Executing alternative: {alt_route_cmd}")
-                stdin, stdout, stderr = self.ssh.exec_command(alt_route_cmd)
-                time.sleep(1)
-                
-                alt_output = stdout.read().decode().strip()
-                alt_error = stderr.read().decode().strip()
-                
-                if alt_error:
-                    logger.error(f"Alternative route command also failed: {alt_error}")
-                    return False
-                else:
-                    logger.info("Alternative route command succeeded")
-                    route_output = alt_output
-            
-            # Show current configuration changes before commit
-            logger.info("Showing configuration changes...")
-            stdin, stdout, stderr = self.ssh.exec_command("show configuration commands")
-            show_output = stdout.read().decode().strip()
-            show_error = stderr.read().decode().strip()
-            
-            if show_error:
-                logger.error(f"Show config error: {show_error}")
-            else:
-                logger.info(f"Current config changes:\n{show_output}")
-            
-            # Commit and save
-            logger.info("Committing configuration")
-            stdin, stdout, stderr = self.ssh.exec_command("commit")
-            time.sleep(3)
-            
-            # Check commit output
-            commit_output = stdout.read().decode().strip()
-            commit_error = stderr.read().decode().strip()
-            
+            # Prepare configuration commands
+            config_commands = [
+                f"set protocols static route6 {prefix_cidr} next-hop {cpe_link_local} interface {interface_name}",
+                f"set protocols static route6 {prefix_cidr} next-hop {cpe_link_local}"  # Fallback without interface
+            ]
+
+            logger.info(f"Configuring route for {prefix_cidr}")
+
+            # Send configuration commands
+            output = self.net_connect.send_config_set(config_commands, exit_config_mode=False)
+            logger.info(f"Configuration output: {output}")
+
+            # Commit the configuration
+            logger.info("Committing configuration...")
+            commit_output = self.net_connect.commit()
             logger.info(f"Commit output: {commit_output}")
-            if commit_error:
-                logger.error(f"Commit error: {commit_error}")
-                logger.error("Attempting to discard changes and exit...")
-                stdin, stdout, stderr = self.ssh.exec_command("exit discard")
-                return False
-            
-            logger.info("Saving configuration")
-            stdin, stdout, stderr = self.ssh.exec_command("save")
-            time.sleep(1)
-            
+
+            # Save the configuration
+            logger.info("Saving configuration...")
+            save_output = self.net_connect.send_command("save")
+            logger.info(f"Save output: {save_output}")
+
             # Exit configuration mode
-            stdin, stdout, stderr = self.ssh.exec_command("exit")
-            time.sleep(1)
-            
-            # Verify the route was actually configured
+            self.net_connect.exit_config_mode()
+
+            # Verify the route was configured
             logger.info("Verifying route configuration...")
             if self.verify_route(prefix_cidr, cpe_link_local, interface_name):
                 logger.info(f"✅ Successfully configured and verified route for {prefix_cidr} via {cpe_link_local} interface {interface_name}")
@@ -507,16 +408,16 @@ class VyOSRouter:
             else:
                 logger.error(f"❌ Route configuration verification failed for {prefix_cidr}")
                 return False
-            
+
         except Exception as e:
             logger.error(f"Failed to configure route: {str(e)}")
             return False
     
     def close(self):
         """Close SSH connection"""
-        if self.ssh:
-            self.ssh.close()
-            self.ssh = None
+        if self.net_connect:
+            self.net_connect.disconnect()
+            self.net_connect = None
 
 
 def validate_webhook_data(data: Dict[str, Any]) -> tuple[bool, str]:
@@ -763,30 +664,19 @@ def verify_routes():
             }), 500
         
         try:
-            if not router.ssh:
+            if not router.net_connect:
                 return jsonify({
                     "status": "error",
                     "message": "SSH connection not established",
                     "router_ip": router_ip
                 }), 500
-                
+
             if prefix_cidr:
                 # Verify specific route
                 verify_cmd = f"show configuration commands | match 'set protocols static route6 {prefix_cidr}'"
                 logger.info(f"Verifying specific route with: {verify_cmd}")
-                stdin, stdout, stderr = router.ssh.exec_command(verify_cmd)
-                
-                output = stdout.read().decode().strip()
-                error_output = stderr.read().decode().strip()
-                
-                if error_output:
-                    return jsonify({
-                        "status": "error",
-                        "message": f"Verification command error: {error_output}",
-                        "router_ip": router_ip,
-                        "prefix_cidr": prefix_cidr
-                    }), 500
-                
+                output = router.net_connect.send_command(verify_cmd)
+
                 return jsonify({
                     "status": "success",
                     "message": f"Route verification completed for {prefix_cidr}",
@@ -799,20 +689,10 @@ def verify_routes():
                 # Show all static routes
                 routes_cmd = "show configuration commands | match 'set protocols static route6'"
                 logger.info(f"Getting all static routes with: {routes_cmd}")
-                stdin, stdout, stderr = router.ssh.exec_command(routes_cmd)
-                
-                output = stdout.read().decode().strip()
-                error_output = stderr.read().decode().strip()
-                
-                if error_output:
-                    return jsonify({
-                        "status": "error",
-                        "message": f"Routes command error: {error_output}",
-                        "router_ip": router_ip
-                    }), 500
-                
+                output = router.net_connect.send_command(routes_cmd)
+
                 routes = output.split('\n') if output.strip() else []
-                
+
                 return jsonify({
                     "status": "success",
                     "message": f"Retrieved {len(routes)} static routes",
