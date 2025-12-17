@@ -418,6 +418,69 @@ extractCpeLinkLocal(const Pkt6Ptr& query) {
             DEBUG_LOG("PD_WEBHOOK: Failed to access relay_info");
         }
         
+        // If we found a peer address, return it
+        if (!peer_address.empty() && peer_address.find("fe80::") == 0) {
+            return peer_address;
+        }
+    }
+    
+    // Return empty string if no link-local address found
+    return "";
+}
+
+// Extract router IP from relay information
+static std::string
+extractRouterIp(const Pkt6Ptr& query) {
+    if (!query || query->relay_info_.empty()) {
+        return "";
+    }
+    
+    // Return the remote address (source of the relay packet)
+    return query->getRemoteAddr().toText();
+}
+
+// Extract router link address from relay information
+static std::string
+extractRouterLinkAddr(const Pkt6Ptr& query) {
+    if (!query || query->relay_info_.empty()) {
+        return "";
+    }
+    
+    // Return the link address from the first relay
+    const Pkt6::RelayInfo& relay = query->relay_info_[0];
+    return relay.linkaddr_.toText();
+}
+
+// Dump relay information for debugging
+static void
+dumpRelayInfo(const Pkt6Ptr& query) {
+    if (!query) {
+        return;
+    }
+    
+    // Check if this is a relayed message
+    if (query->relay_info_.empty()) {
+        DEBUG_LOG("PD_WEBHOOK: No relay information (direct message)");
+        return;
+    }
+    
+    DEBUG_LOG("PD_WEBHOOK: Relay information - " << query->relay_info_.size() << " relay(s):");
+    
+    for (size_t i = 0; i < query->relay_info_.size(); ++i) {
+        const Pkt6::RelayInfo& relay = query->relay_info_[i];
+        DEBUG_LOG("PD_WEBHOOK:   Relay " << i << ":");
+        DEBUG_LOG("PD_WEBHOOK:     msg_type: " << static_cast<unsigned int>(relay.msg_type_));
+        DEBUG_LOG("PD_WEBHOOK:     hop_count: " << static_cast<unsigned int>(relay.hop_count_));
+        DEBUG_LOG("PD_WEBHOOK:     link_addr: " << relay.linkaddr_.toText());
+        DEBUG_LOG("PD_WEBHOOK:     peer_addr: " << relay.peeraddr_.toText());
+        
+        // Dump interface-id option if present
+        auto interface_id_it = relay.options_.find(D6O_INTERFACE_ID);
+        if (interface_id_it != relay.options_.end()) {
+            const std::vector<uint8_t>& data = interface_id_it->second->getData();
+            DEBUG_LOG("PD_WEBHOOK:     interface-id: " << toHex(data));
+        }
+        
         // Dump relay-message option if present
         auto relay_msg_it = relay.options_.find(D6O_RELAY_MSG);
         if (relay_msg_it != relay.options_.end()) {
@@ -438,64 +501,6 @@ extractCpeLinkLocal(const Pkt6Ptr& query) {
             DEBUG_LOG("PD_WEBHOOK:     relay-msg: not found in relay options");
         }
         
-        // Also try to dump the raw packet data if available
-        // Since Kea decapsulates relay messages, let's dump the processed query packet
-        // Build a representation of what the original relay packet might have looked like
-        if (g_cfg.debug) {
-            DEBUG_LOG("PD_WEBHOOK:     building relay packet representation:");
-            
-            std::vector<uint8_t> relay_packet;
-            
-            // Relay header: msg_type (1 byte) + hop_count (1 byte)
-            relay_packet.push_back(relay.msg_type_);
-            relay_packet.push_back(relay.hop_count_);
-            
-            // Link address (16 bytes for IPv6) - simplified
-            const std::string& link_str = relay.linkaddr_.toText();
-            // For hex dump purposes, we'll add a simplified representation
-            for (int i = 0; i < 16; i++) {
-                relay_packet.push_back(0x20); // placeholder
-            }
-            
-            // Peer address (16 bytes for IPv6) - simplified  
-            for (int i = 0; i < 16; i++) {
-                relay_packet.push_back(0xfe); // placeholder
-            }
-            
-            // Add all relay options
-            for (const auto& opt_pair : relay.options_) {
-                uint16_t opt_code = opt_pair.first;
-                const std::vector<uint8_t>& opt_data = opt_pair.second->getData();
-                uint16_t opt_len = opt_data.size();
-                
-                // Option code (2 bytes, network order)
-                relay_packet.push_back((opt_code >> 8) & 0xFF);
-                relay_packet.push_back(opt_code & 0xFF);
-                // Option length (2 bytes, network order)
-                relay_packet.push_back((opt_len >> 8) & 0xFF);
-                relay_packet.push_back(opt_len & 0xFF);
-                // Option data
-                relay_packet.insert(relay_packet.end(), opt_data.begin(), opt_data.end());
-            }
-            
-            // Add the encapsulated DHCPv6 message (simplified representation)
-            // Message type: query->getType()
-            relay_packet.push_back(query->getType());
-            // Transaction ID (3 bytes)
-            uint32_t transid = query->getTransid();
-            relay_packet.push_back((transid >> 16) & 0xFF);
-            relay_packet.push_back((transid >> 8) & 0xFF);
-            relay_packet.push_back(transid & 0xFF);
-            
-            DEBUG_LOG("PD_WEBHOOK:     relay packet representation:");
-            std::string hexdump = hexDump(relay_packet.data(), relay_packet.size());
-            std::istringstream iss(hexdump);
-            std::string line;
-            while (std::getline(iss, line)) {
-                DEBUG_LOG("PD_WEBHOOK:       " << line);
-            }
-        }
-        
         // Dump all options in this relay level
         DEBUG_LOG("PD_WEBHOOK:     options count: " << relay.options_.size());
         for (const auto& opt_pair : relay.options_) {
@@ -513,8 +518,6 @@ extractCpeLinkLocal(const Pkt6Ptr& query) {
                 }
             }
         }
-        
-
     }
 }
 
@@ -530,16 +533,25 @@ notifyPdAssigned(const Pkt6Ptr& query6,
 
     // Collect PD leases only.
     std::vector<Lease6Ptr> pd_leases;
+    DEBUG_LOG("PD_WEBHOOK: Processing " << leases6->size() << " total leases");
+    
     for (const auto& l : *leases6) {
         if (!l) {
             continue;
         }
+        DEBUG_LOG("PD_WEBHOOK: Lease type: " << static_cast<int>(l->type_) 
+                  << " (NA=" << Lease::TYPE_NA 
+                  << ", TA=" << Lease::TYPE_TA 
+                  << ", PD=" << Lease::TYPE_PD << ")"
+                  << " address: " << l->addr_.toText());
+        
         if (l->type_ == Lease::TYPE_PD) {
             pd_leases.push_back(l);
         }
     }
 
     if (pd_leases.empty()) {
+        DEBUG_LOG("PD_WEBHOOK: No PD leases found, returning");
         return;
     }
     
