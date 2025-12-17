@@ -314,7 +314,8 @@ notifyPdAssigned(const Pkt6Ptr& query6,
             os << "\"iaid\":" << l->iaid_ << ",";
             os << "\"subnet_id\":" << l->subnet_id_ << ",";
             os << "\"preferred_lft\":" << l->preferred_lft_ << ",";
-            os << "\"valid_lft\":" << l->valid_lft_;
+            os << "\"valid_lft\":" << l->valid_lft_ << ",";
+            os << "\"expires_at\":" << (std::time(nullptr) + l->valid_lft_);
             os << "}";
         }
 
