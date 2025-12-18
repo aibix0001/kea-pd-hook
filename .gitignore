@@ -81,3 +81,6 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
+
+# our files/folders
+scratch/
