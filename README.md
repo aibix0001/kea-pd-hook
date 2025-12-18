@@ -31,6 +31,27 @@ This hook library provides real-time visibility for DHCPv6 Prefix Delegation eve
 
 ### Build Commands
 
+#### Using CMake (Recommended)
+
+```bash
+# Create build directory
+mkdir build && cd build
+
+# Configure build
+cmake ..
+
+# Build the library
+make
+
+# Install to Kea hooks directory
+sudo make install
+
+# Restart Kea DHCPv6 service
+sudo systemctl restart isc-kea-dhcp6-server
+```
+
+#### Manual Build with g++
+
 ```bash
 # Build the hook library
 g++ -shared -fPIC -std=c++17 -I/usr/include/kea -o libpd_webhook.so pd_webhook.cc -lcurl -ljsoncpp
@@ -115,7 +136,7 @@ journalctl -u isc-kea-dhcp6-server -f
 
 ## Development
 
-This project follows Kea hook library conventions and uses C++17 standards. See `AGENTS.md` for detailed development guidelines and build commands.
+This project follows Kea hook library conventions and uses C++17 standards.
 
 ## Hook Points
 
