@@ -637,6 +637,40 @@ notifyPdAssigned(const Pkt6Ptr& query6,
     }
 }
 
+// Notify PD lease expiration
+static void
+notifyPdExpired(const Lease6Ptr& lease)
+{
+    if (!lease || lease->type_ != Lease::TYPE_PD) {
+        return;
+    }
+
+    DEBUG_LOG("PD_WEBHOOK: Notifying PD lease expiration for " << lease->addr_.toText() << "/" << lease->prefixlen_);
+
+    // Send webhook notification if configured
+    if (g_cfg.enabled && !g_cfg.url.empty()) {
+        // Build JSON payload for expired lease
+        std::ostringstream os;
+        os << "{";
+        os << "\"event\":\"pd_expired\",";
+        os << "\"lease\":{";
+        os << "\"prefix\":\"" << lease->addr_.toText() << "\",";
+        os << "\"prefix_length\":" << static_cast<unsigned int>(lease->prefixlen_) << ",";
+        os << "\"iaid\":" << lease->iaid_ << ",";
+        os << "\"duid\":\"" << toHex(lease->duid_->getDuid()) << "\",";
+        os << "\"cltt\":" << lease->cltt_ << ",";
+        os << "\"valid_lft\":" << lease->valid_lft_ << ",";
+        os << "\"preferred_lft\":" << lease->preferred_lft_;
+        os << "}";
+        os << "}";
+
+        postWebhook(os.str());
+    }
+
+    // TODO: Handle NetBox update for expired leases
+    // For now, we skip NetBox update as the logic needs to be defined
+}
+
 // Hook callout: leases6_committed
 extern "C" {
 
@@ -683,6 +717,40 @@ leases6_committed(CalloutHandle& handle) {
         dumpRelayInfo(query6);
         
         notifyPdAssigned(query6, response6, leases6);
+
+    } catch (...) {
+        // Do not throw into Kea; errors are silently ignored here.
+    }
+
+    return (0);
+}
+
+// Hook callout: lease6_expire
+int
+lease6_expire(CalloutHandle& handle) {
+    try {
+        // Always log that hook was called
+        DEBUG_LOG("PD_WEBHOOK: lease6_expire called");
+
+        if (!g_cfg.enabled) {
+            DEBUG_LOG("PD_WEBHOOK: hook disabled, returning");
+            return (0);
+        }
+
+        Lease6Ptr lease;
+        handle.getArgument("lease6", lease);
+
+        if (!lease) {
+            DEBUG_LOG("PD_WEBHOOK: No lease provided, returning");
+            return (0);
+        }
+
+        DEBUG_LOG("PD_WEBHOOK: Processing expired lease: " << lease->addr_.toText() << "/" << lease->prefixlen_
+                  << " type: " << static_cast<int>(lease->type_));
+
+        if (lease->type_ == Lease::TYPE_PD) {
+            notifyPdExpired(lease);
+        }
 
     } catch (...) {
         // Do not throw into Kea; errors are silently ignored here.
