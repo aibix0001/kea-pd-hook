@@ -247,21 +247,9 @@ static bool
 updateExpiredPrefix(int prefix_id, const PdAssignmentData& data) {
     std::string endpoint = "ipam/prefixes/" + std::to_string(prefix_id) + "/";
 
-    // Set expiration timestamp to current time (lease expired)
-    time_t expires_at = time(nullptr);
-
     std::ostringstream payload;
     payload << "{";
-    payload << "\"status\":\"deprecated\",";  // Mark as deprecated/expired
-    payload << "\"description\":\"DHCPv6 PD assignment expired - IAID: " << data.iaid << "\",";
-    payload << "\"custom_fields\":{";
-    payload << "\"dhcpv6_client_duid\":\"" << data.client_duid << "\",";
-    payload << "\"dhcpv6_iaid\":" << data.iaid << ",";
-    payload << "\"dhcpv6_cpe_link_local\":\"" << data.cpe_link_local << "\",";
-    payload << "\"dhcpv6_router_ip\":\"" << data.router_ip << "\",";
-    payload << "\"dhcpv6_router_link_addr\":\"" << data.router_link_addr << "\",";
-    payload << "\"dhcpv6_leasetime\":" << expires_at;
-    payload << "}";
+    payload << "\"status\":\"deprecated\"";  // Just mark as deprecated/expired
     payload << "}";
 
     std::string payload_str = payload.str();
