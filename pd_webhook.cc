@@ -203,7 +203,8 @@ findPrefixId(const std::string& prefix, int prefix_length) {
 
 // Update existing prefix with new data
 static bool
-updatePrefix(int prefix_id, const PdAssignmentData& data, uint32_t valid_lft, uint32_t preferred_lft) {
+updatePrefix(int prefix_id, const PdAssignmentData& data, uint32_t valid_lft, uint32_t preferred_lft,
+             const std::string& status = "active") {
     std::string endpoint = "ipam/prefixes/" + std::to_string(prefix_id) + "/";
 
     // Calculate expiration timestamp (current time + valid lifetime)
@@ -226,6 +227,45 @@ updatePrefix(int prefix_id, const PdAssignmentData& data, uint32_t valid_lft, ui
 
     std::string payload_str = payload.str();
     DEBUG_LOG("PD_WEBHOOK: updatePrefix payload: " << payload_str);
+
+    std::string response = netboxHttpRequest("PATCH", endpoint, payload_str);
+
+    if (response.empty()) {
+        return false;
+    }
+
+    // Check if update was successful
+    if (response.find("\"id\":") != std::string::npos) {
+        return true;
+    }
+
+    return false;
+}
+
+// Update existing prefix to mark as expired
+static bool
+updateExpiredPrefix(int prefix_id, const PdAssignmentData& data) {
+    std::string endpoint = "ipam/prefixes/" + std::to_string(prefix_id) + "/";
+
+    // Set expiration timestamp to current time (lease expired)
+    time_t expires_at = time(nullptr);
+
+    std::ostringstream payload;
+    payload << "{";
+    payload << "\"status\":\"deprecated\",";  // Mark as deprecated/expired
+    payload << "\"description\":\"DHCPv6 PD assignment expired - IAID: " << data.iaid << "\",";
+    payload << "\"custom_fields\":{";
+    payload << "\"dhcpv6_client_duid\":\"" << data.client_duid << "\",";
+    payload << "\"dhcpv6_iaid\":" << data.iaid << ",";
+    payload << "\"dhcpv6_cpe_link_local\":\"" << data.cpe_link_local << "\",";
+    payload << "\"dhcpv6_router_ip\":\"" << data.router_ip << "\",";
+    payload << "\"dhcpv6_router_link_addr\":\"" << data.router_link_addr << "\",";
+    payload << "\"dhcpv6_leasetime\":" << expires_at;
+    payload << "}";
+    payload << "}";
+
+    std::string payload_str = payload.str();
+    DEBUG_LOG("PD_WEBHOOK: updateExpiredPrefix payload: " << payload_str);
 
     std::string response = netboxHttpRequest("PATCH", endpoint, payload_str);
 
@@ -667,8 +707,26 @@ notifyPdExpired(const Lease6Ptr& lease)
         postWebhook(os.str());
     }
 
-    // TODO: Handle NetBox update for expired leases
-    // For now, we skip NetBox update as the logic needs to be defined
+    // Handle NetBox update for expired leases
+    PdAssignmentData data;
+    data.client_duid = toHex(lease->duid_->getDuid());
+    data.prefix = lease->addr_.toText();
+    data.prefix_length = lease->prefixlen_;
+    data.iaid = lease->iaid_;
+    // For expired leases, relay info may not be available
+    data.cpe_link_local = "";
+    data.router_ip = "";
+    data.router_link_addr = "";
+
+    DEBUG_LOG("PD_WEBHOOK: Updating NetBox for expired prefix " << data.prefix << "/" << data.prefix_length);
+
+    // Check if prefix exists in NetBox and update to expired status
+    int existing_prefix_id = findPrefixId(data.prefix, data.prefix_length);
+    if (existing_prefix_id > 0) {
+        updateExpiredPrefix(existing_prefix_id, data);
+    } else {
+        DEBUG_LOG("PD_WEBHOOK: Prefix not found in NetBox, skipping expired update");
+    }
 }
 
 // Hook callout: leases6_committed
@@ -750,6 +808,43 @@ lease6_expire(CalloutHandle& handle) {
 
         if (lease->type_ == Lease::TYPE_PD) {
             notifyPdExpired(lease);
+        }
+
+    } catch (...) {
+        // Do not throw into Kea; errors are silently ignored here.
+    }
+
+    return (0);
+}
+
+// Hook callout: lease6_recover
+int
+lease6_recover(CalloutHandle& handle) {
+    try {
+        // Always log that hook was called
+        DEBUG_LOG("PD_WEBHOOK: lease6_recover called");
+
+        if (!g_cfg.enabled) {
+            DEBUG_LOG("PD_WEBHOOK: hook disabled, returning");
+            return (0);
+        }
+
+        Lease6Ptr lease;
+        handle.getArgument("lease6", lease);
+
+        if (!lease) {
+            DEBUG_LOG("PD_WEBHOOK: No lease provided, returning");
+            return (0);
+        }
+
+        DEBUG_LOG("PD_WEBHOOK: Processing recovered lease: " << lease->addr_.toText() << "/" << lease->prefixlen_
+                  << " type: " << static_cast<int>(lease->type_));
+
+        if (lease->type_ == Lease::TYPE_PD) {
+            // For recovered leases, we might want to notify or update NetBox
+            // Similar to assigned, but mark as recovered
+            DEBUG_LOG("PD_WEBHOOK: PD lease recovered, could notify NetBox if needed");
+            // TODO: Implement recovery notification if required
         }
 
     } catch (...) {
