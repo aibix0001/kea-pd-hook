@@ -11,6 +11,7 @@
 #include <hooks/library_handle.h>
 
 #include <curl/curl.h>
+#include <jsoncpp/json/json.h>
 
 #include <iomanip>
 #include <sstream>
@@ -34,6 +35,15 @@ struct PdAssignmentData {
     std::string router_link_addr;    // Router's link-address from relay packet
 };
 
+// Error codes for structured error reporting
+enum class ErrorCode {
+    NONE,
+    CURL_INIT_FAILED,
+    HTTP_REQUEST_FAILED,
+    JSON_PARSE_FAILED,
+    INVALID_RESPONSE
+};
+
 // Simple runtime configuration for this library.
 struct WebhookConfig {
     std::string url;
@@ -45,9 +55,19 @@ struct WebhookConfig {
     std::string netbox_url;
     std::string netbox_token;
     bool netbox_enabled{false};
+
+    // Error reporting
+    ErrorCode last_error{ErrorCode::NONE};
+    std::string last_error_msg;
 };
 
 static WebhookConfig g_cfg;
+
+// Error logging macro
+#define ERROR_LOG(msg) do { \
+    g_cfg.last_error_msg = msg; \
+    std::cerr << "[ERROR] " << msg << std::endl; \
+} while(0)
 
 // Debug logging macro
 #define DEBUG_LOG(msg) do { if (g_cfg.debug) std::cout << msg << std::endl; } while(0)
@@ -61,6 +81,21 @@ toHex(const std::vector<uint8_t>& data) {
         os << std::setw(2) << static_cast<unsigned int>(b);
     }
     return os.str();
+}
+
+// Safe integer parsing to prevent exceptions
+static int safeParseInt(const std::string& str, int default_val = -1) {
+    try {
+        size_t pos = 0;
+        int val = std::stoi(str, &pos);
+        if (pos != str.size()) {
+            return default_val;  // Trailing characters
+        }
+        return val;
+    } catch (const std::exception& e) {
+        DEBUG_LOG("PD_WEBHOOK: Failed to parse int: " << e.what());
+        return default_val;
+    }
 }
 
 // Hex dump helper in the specified format
@@ -169,6 +204,7 @@ netboxHttpRequest(const std::string& method, const std::string& endpoint, const 
     curl_easy_cleanup(curl);
 
     if (res != CURLE_OK) {
+        ERROR_LOG("HTTP request failed: " + std::string(curl_easy_strerror(res)));
         return "";
     }
 
@@ -185,47 +221,51 @@ findPrefixId(const std::string& prefix, int prefix_length) {
         return -1;
     }
 
-    // Check if prefix exists
-    if (response.find("\"count\":0") == std::string::npos) {
-        // Prefix exists, extract ID
-        size_t id_pos = response.find("\"id\":");
-        if (id_pos != std::string::npos) {
-            id_pos += 5;
-            size_t comma_pos = response.find(",", id_pos);
-            if (comma_pos != std::string::npos) {
-                return std::stoi(response.substr(id_pos, comma_pos - id_pos));
-            }
-        }
+    Json::Value root;
+    Json::CharReaderBuilder builder;
+    Json::CharReader* reader = builder.newCharReader();
+    std::string errors;
+    bool success = reader->parse(response.c_str(), response.c_str() + response.size(), &root, &errors);
+    delete reader;
+
+    if (!success || !root.isMember("results") || !root["results"].isArray()) {
+        DEBUG_LOG("PD_WEBHOOK: Failed to parse NetBox response: " << errors);
+        return -1;
     }
 
-    return -1;
+    if (root["results"].size() == 0) {
+        return -1;
+    }
+
+    return root["results"][0]["id"].asInt();
 }
 
 // Update existing prefix with new data
 static bool
 updatePrefix(int prefix_id, const PdAssignmentData& data, uint32_t valid_lft, uint32_t preferred_lft,
-             const std::string& status = "active") {
+              const std::string& status = "active") {
     std::string endpoint = "ipam/prefixes/" + std::to_string(prefix_id) + "/";
 
     // Calculate expiration timestamp (current time + valid lifetime)
     time_t now = time(nullptr);
     time_t expires_at = now + valid_lft;
 
-    std::ostringstream payload;
-    payload << "{";
-    payload << "\"status\":\"active\",";
-    payload << "\"description\":\"DHCPv6 PD assignment - IAID: " << data.iaid << "\",";
-    payload << "\"custom_fields\":{";
-    payload << "\"dhcpv6_client_duid\":\"" << data.client_duid << "\",";
-    payload << "\"dhcpv6_iaid\":" << data.iaid << ",";
-    payload << "\"dhcpv6_cpe_link_local\":\"" << data.cpe_link_local << "\",";
-    payload << "\"dhcpv6_router_ip\":\"" << data.router_ip << "\",";
-    payload << "\"dhcpv6_router_link_addr\":\"" << data.router_link_addr << "\",";
-    payload << "\"dhcpv6_leasetime\":" << expires_at;
-    payload << "}";
-    payload << "}";
+    Json::Value payload;
+    payload["status"] = status;
+    payload["description"] = "DHCPv6 PD assignment - IAID: " + std::to_string(data.iaid);
 
-    std::string payload_str = payload.str();
+    Json::Value custom_fields;
+    custom_fields["dhcpv6_client_duid"] = data.client_duid;
+    custom_fields["dhcpv6_iaid"] = static_cast<int>(data.iaid);
+    custom_fields["dhcpv6_cpe_link_local"] = data.cpe_link_local;
+    custom_fields["dhcpv6_router_ip"] = data.router_ip;
+    custom_fields["dhcpv6_router_link_addr"] = data.router_link_addr;
+    custom_fields["dhcpv6_leasetime"] = static_cast<int>(expires_at);
+    payload["custom_fields"] = custom_fields;
+
+    Json::StreamWriterBuilder builder;
+    builder["indentation"] = "";
+    std::string payload_str = Json::writeString(builder, payload);
     DEBUG_LOG("PD_WEBHOOK: updatePrefix payload: " << payload_str);
 
     std::string response = netboxHttpRequest("PATCH", endpoint, payload_str);
@@ -247,12 +287,12 @@ static bool
 updateExpiredPrefix(int prefix_id, const PdAssignmentData& data) {
     std::string endpoint = "ipam/prefixes/" + std::to_string(prefix_id) + "/";
 
-    std::ostringstream payload;
-    payload << "{";
-    payload << "\"status\":\"deprecated\"";  // Just mark as deprecated/expired
-    payload << "}";
+    Json::Value payload;
+    payload["status"] = "deprecated";  // Just mark as deprecated/expired
 
-    std::string payload_str = payload.str();
+    Json::StreamWriterBuilder builder;
+    builder["indentation"] = "";
+    std::string payload_str = Json::writeString(builder, payload);
     DEBUG_LOG("PD_WEBHOOK: updateExpiredPrefix payload: " << payload_str);
 
     std::string response = netboxHttpRequest("PATCH", endpoint, payload_str);
@@ -276,22 +316,23 @@ createPrefix(const PdAssignmentData& data, uint32_t valid_lft, uint32_t preferre
     time_t now = time(nullptr);
     time_t expires_at = now + valid_lft;
 
-    std::ostringstream payload;
-    payload << "{";
-    payload << "\"prefix\":\"" << data.prefix << "/" << data.prefix_length << "\",";
-    payload << "\"status\":\"active\",";
-    payload << "\"description\":\"DHCPv6 PD assignment - IAID: " << data.iaid << "\",";
-    payload << "\"custom_fields\":{";
-    payload << "\"dhcpv6_client_duid\":\"" << data.client_duid << "\",";
-    payload << "\"dhcpv6_iaid\":" << data.iaid << ",";
-    payload << "\"dhcpv6_cpe_link_local\":\"" << data.cpe_link_local << "\",";
-    payload << "\"dhcpv6_router_ip\":\"" << data.router_ip << "\",";
-    payload << "\"dhcpv6_router_link_addr\":\"" << data.router_link_addr << "\",";
-    payload << "\"dhcpv6_leasetime\":" << expires_at;
-    payload << "}";
-    payload << "}";
+    Json::Value payload;
+    payload["prefix"] = data.prefix + "/" + std::to_string(data.prefix_length);
+    payload["status"] = "active";
+    payload["description"] = "DHCPv6 PD assignment - IAID: " + std::to_string(data.iaid);
 
-    std::string payload_str = payload.str();
+    Json::Value custom_fields;
+    custom_fields["dhcpv6_client_duid"] = data.client_duid;
+    custom_fields["dhcpv6_iaid"] = static_cast<int>(data.iaid);
+    custom_fields["dhcpv6_cpe_link_local"] = data.cpe_link_local;
+    custom_fields["dhcpv6_router_ip"] = data.router_ip;
+    custom_fields["dhcpv6_router_link_addr"] = data.router_link_addr;
+    custom_fields["dhcpv6_leasetime"] = static_cast<int>(expires_at);
+    payload["custom_fields"] = custom_fields;
+
+    Json::StreamWriterBuilder builder;
+    builder["indentation"] = "";
+    std::string payload_str = Json::writeString(builder, payload);
     DEBUG_LOG("PD_WEBHOOK: createPrefix payload: " << payload_str);
 
     std::string response = netboxHttpRequest("POST", "ipam/prefixes/", payload_str);
@@ -346,113 +387,21 @@ extractClientDuid(const Pkt6Ptr& query) {
 static std::string
 extractCpeLinkLocal(const Pkt6Ptr& query) {
     DEBUG_LOG("PD_WEBHOOK: >>> extractCpeLinkLocal() called");
-    std::string peer_address = "";
 
-    // First, try to extract peer-address from relay-forward message
-    if (query) {
-        DEBUG_LOG("PD_WEBHOOK: extractCpeLinkLocal - query is valid");
-
-        // Check if this packet itself is a relay message (RELAY-FORWARD or RELAY-REPLY)
-        uint8_t msg_type = query->getType();
-        DEBUG_LOG("PD_WEBHOOK: Message type: " << static_cast<int>(msg_type)
-                  << " (REQUEST=" << static_cast<int>(DHCPV6_REQUEST)
-                  << ", RELAY_FORW=" << static_cast<int>(DHCPV6_RELAY_FORW)
-                  << ", RELAY_REPL=" << static_cast<int>(DHCPV6_RELAY_REPL) << ")");
-
-        // Check if Kea has stored relay information for this packet
-        // Kea typically stores relay info in the packet's metadata
-        try {
-            // Check if the packet has relay information stored
-            if (query->relay_info_.size() > 0) {
-                DEBUG_LOG("PD_WEBHOOK: Found " << query->relay_info_.size() << " relay info entries");
-
-                // Try to access the correct fields in RelayInfo structure
-                const auto& relay = query->relay_info_[0];
-
-                // Try to access peer_addr_ field (this should contain the CPE's link-local address)
-                try {
-                    // Use direct field access - let's try the correct field names
-                    // Based on Kea source, RelayInfo should have: msg_type_, hop_count_, link_addr_, peer_addr_
-                    if (sizeof(relay) >= 64) { // Rough check that structure has expected fields
-                        DEBUG_LOG("PD_WEBHOOK: RelayInfo structure appears to have expected fields");
-
-                        // Dump entire RelayInfo structure to see what Kea actually stores
-                        const uint8_t* relay_bytes = reinterpret_cast<const uint8_t*>(&relay);
-
-                        DEBUG_LOG("PD_WEBHOOK: Full RelayInfo dump (" << sizeof(relay) << " bytes):");
-                        for (size_t i = 0; i < sizeof(relay); i++) {
-                            if (g_cfg.debug) {
-                                std::cout << std::hex << std::setw(2) << std::setfill('0') << static_cast<unsigned int>(relay_bytes[i]);
-                                if ((i + 1) % 16 == 0) {
-                                    std::cout << std::endl;
-                                } else {
-                                    std::cout << " ";
-                                }
-                            }
-                        }
-                        if (g_cfg.debug) std::cout << std::dec << std::endl;
-
-                        // Look for fe80 pattern (start of link-local address)
-                        for (size_t i = 0; i < sizeof(relay) - 1; i++) {
-                            if (relay_bytes[i] == 0xfe && relay_bytes[i+1] == 0x80) {
-                                DEBUG_LOG("PD_WEBHOOK: Found fe80 pattern at offset " << i);
-
-                                // Extract 16 bytes from this position
-                                if (i + 16 <= sizeof(relay)) {
-                                    std::ostringstream peer_stream;
-                                    peer_stream << std::hex << std::setfill('0');
-
-                                    for (int j = 0; j < 16; j++) {
-                                        if (j == 0) {
-                                            peer_stream << static_cast<unsigned int>(relay_bytes[i + j]);
-                                        } else if (j % 2 == 0) {
-                                            peer_stream << ":" << std::setw(2) << static_cast<unsigned int>(relay_bytes[i + j]);
-                                        } else {
-                                            peer_stream << std::setw(2) << static_cast<unsigned int>(relay_bytes[i + j]);
-                                        }
-                                    }
-
-                                    std::string extracted_peer = peer_stream.str();
-                                    DEBUG_LOG("PD_WEBHOOK: Extracted peer address: " << extracted_peer);
-
-                                    if (extracted_peer.find("fe80") == 0) {
-                                        // Use Kea's IOAddress to properly compress IPv6 address
-                                        try {
-                                            isc::asiolink::IOAddress addr(extracted_peer);
-                                            peer_address = addr.toText();
-                                            DEBUG_LOG("PD_WEBHOOK: Using compressed peer address: " << peer_address);
-                                            return peer_address;
-                                        } catch (...) {
-                                            // Fallback to original address if compression fails
-                                            peer_address = extracted_peer;
-                                            DEBUG_LOG("PD_WEBHOOK: Using uncompressed peer address: " << peer_address);
-                                            return peer_address;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                } catch (...) {
-                    DEBUG_LOG("PD_WEBHOOK: Failed to extract peer address from RelayInfo");
-                }
-
-                // If we found a peer address, return it
-                if (!peer_address.empty() && peer_address.find("fe80::") == 0) {
-                    return peer_address;
-                }
-            }
-        } catch (...) {
-            DEBUG_LOG("PD_WEBHOOK: Failed to access relay_info");
-        }
-        
-        // If we found a peer address, return it
-        if (!peer_address.empty() && peer_address.find("fe80::") == 0) {
-            return peer_address;
-        }
+    if (!query || query->relay_info_.empty()) {
+        return "";
     }
-    
-    // Return empty string if no link-local address found
+
+    const Pkt6::RelayInfo& relay = query->relay_info_[0];
+    std::string peer_address = relay.peeraddr_.toText();
+
+    DEBUG_LOG("PD_WEBHOOK: Extracted peer address: " << peer_address);
+
+    // Verify it's a link-local address
+    if (!peer_address.empty() && peer_address.find("fe80::") == 0) {
+        return peer_address;
+    }
+
     return "";
 }
 
@@ -610,40 +559,35 @@ notifyPdAssigned(const Pkt6Ptr& query6,
             DEBUG_LOG("PD_WEBHOOK: No relay information found (direct message)");
         }
 
-        // Build JSON manually. All fields we use are safe without escaping.
-        std::ostringstream os;
-        os << "{";
-        os << "\"event\":\"pd_assigned\",";
-        os << "\"msg_type\":" << static_cast<unsigned int>(query6->getType()) << ",";
-        os << "\"reply_type\":" << static_cast<unsigned int>(response6->getType()) << ",";
-        os << "\"client_duid\":\"" << client_duid_hex << "\",";
-        os << "\"link_addr\":\"" << link_addr << "\",";
-        os << "\"peer_addr\":\"" << peer_addr << "\",";
-        os << "\"relay_src_addr\":\"" << relay_src_addr << "\",";
-        os << "\"leases\":[";
+        // Build JSON using jsoncpp
+        Json::Value payload;
+        payload["event"] = "pd_assigned";
+        payload["msg_type"] = static_cast<int>(query6->getType());
+        payload["reply_type"] = static_cast<int>(response6->getType());
+        payload["client_duid"] = client_duid_hex;
+        payload["link_addr"] = link_addr;
+        payload["peer_addr"] = peer_addr;
+        payload["relay_src_addr"] = relay_src_addr;
 
-        bool first = true;
+        Json::Value leases(Json::arrayValue);
         for (const auto& l : pd_leases) {
-            if (!first) {
-                os << ",";
-            }
-            first = false;
-
-            os << "{";
-            os << "\"prefix\":\"" << l->addr_.toText() << "\",";
-            os << "\"prefix_length\":" << static_cast<unsigned int>(l->prefixlen_) << ",";
-            os << "\"iaid\":" << l->iaid_ << ",";
-            os << "\"subnet_id\":" << l->subnet_id_ << ",";
-            os << "\"preferred_lft\":" << l->preferred_lft_ << ",";
-            os << "\"valid_lft\":" << l->valid_lft_ << ",";
-            os << "\"expires_at\":" << (std::time(nullptr) + l->valid_lft_);
-            os << "}";
+            Json::Value lease_obj;
+            lease_obj["prefix"] = l->addr_.toText();
+            lease_obj["prefix_length"] = static_cast<int>(l->prefixlen_);
+            lease_obj["iaid"] = static_cast<int>(l->iaid_);
+            lease_obj["subnet_id"] = static_cast<int>(l->subnet_id_);
+            lease_obj["preferred_lft"] = static_cast<int>(l->preferred_lft_);
+            lease_obj["valid_lft"] = static_cast<int>(l->valid_lft_);
+            lease_obj["expires_at"] = static_cast<int>(std::time(nullptr) + l->valid_lft_);
+            leases.append(lease_obj);
         }
+        payload["leases"] = leases;
 
-        os << "]";
-        os << "}";
+        Json::StreamWriterBuilder builder;
+        builder["indentation"] = "";
+        std::string payload_str = Json::writeString(builder, payload);
 
-        postWebhook(os.str());
+        postWebhook(payload_str);
     }
 
     // Send NetBox requests for each PD lease
@@ -678,21 +622,24 @@ notifyPdExpired(const Lease6Ptr& lease)
     // Send webhook notification if configured
     if (g_cfg.enabled && !g_cfg.url.empty()) {
         // Build JSON payload for expired lease
-        std::ostringstream os;
-        os << "{";
-        os << "\"event\":\"pd_expired\",";
-        os << "\"lease\":{";
-        os << "\"prefix\":\"" << lease->addr_.toText() << "\",";
-        os << "\"prefix_length\":" << static_cast<unsigned int>(lease->prefixlen_) << ",";
-        os << "\"iaid\":" << lease->iaid_ << ",";
-        os << "\"duid\":\"" << toHex(lease->duid_->getDuid()) << "\",";
-        os << "\"cltt\":" << lease->cltt_ << ",";
-        os << "\"valid_lft\":" << lease->valid_lft_ << ",";
-        os << "\"preferred_lft\":" << lease->preferred_lft_;
-        os << "}";
-        os << "}";
+        Json::Value payload;
+        payload["event"] = "pd_expired";
 
-        postWebhook(os.str());
+        Json::Value lease_obj;
+        lease_obj["prefix"] = lease->addr_.toText();
+        lease_obj["prefix_length"] = static_cast<int>(lease->prefixlen_);
+        lease_obj["iaid"] = static_cast<int>(lease->iaid_);
+        lease_obj["duid"] = toHex(lease->duid_->getDuid());
+        lease_obj["cltt"] = static_cast<int>(lease->cltt_);
+        lease_obj["valid_lft"] = static_cast<int>(lease->valid_lft_);
+        lease_obj["preferred_lft"] = static_cast<int>(lease->preferred_lft_);
+        payload["lease"] = lease_obj;
+
+        Json::StreamWriterBuilder builder;
+        builder["indentation"] = "";
+        std::string payload_str = Json::writeString(builder, payload);
+
+        postWebhook(payload_str);
     }
 
     // Handle NetBox update for expired leases
@@ -805,6 +752,31 @@ lease6_expire(CalloutHandle& handle) {
     return (0);
 }
 
+// Notify PD lease recovery
+static void notifyPdRecovered(const Lease6Ptr& lease) {
+    if (!lease || lease->type_ != Lease::TYPE_PD) {
+        return;
+    }
+
+    PdAssignmentData data;
+    data.client_duid = toHex(lease->duid_->getDuid());
+    data.prefix = lease->addr_.toText();
+    data.prefix_length = lease->prefixlen_;
+    data.iaid = lease->iaid_;
+    data.cpe_link_local = "";
+    data.router_ip = "";
+    data.router_link_addr = "";
+
+    // Re-activate in NetBox (update status to "active")
+    int existing_prefix_id = findPrefixId(data.prefix, data.prefix_length);
+    if (existing_prefix_id > 0) {
+        updatePrefix(existing_prefix_id, data, lease->valid_lft_, lease->preferred_lft_, "active");
+    } else {
+        // If not found, create new prefix
+        createPrefix(data, lease->valid_lft_, lease->preferred_lft_);
+    }
+}
+
 // Hook callout: lease6_recover
 int
 lease6_recover(CalloutHandle& handle) {
@@ -829,10 +801,7 @@ lease6_recover(CalloutHandle& handle) {
                   << " type: " << static_cast<int>(lease->type_));
 
         if (lease->type_ == Lease::TYPE_PD) {
-            // For recovered leases, we might want to notify or update NetBox
-            // Similar to assigned, but mark as recovered
-            DEBUG_LOG("PD_WEBHOOK: PD lease recovered, could notify NetBox if needed");
-            // TODO: Implement recovery notification if required
+            notifyPdRecovered(lease);
         }
 
     } catch (...) {
