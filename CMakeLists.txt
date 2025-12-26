@@ -20,7 +20,7 @@ add_library(pd_webhook SHARED pd_webhook.cc)
 # Link libraries
 target_link_libraries(pd_webhook
     $<$<TARGET_EXISTS:CURL::libcurl>:CURL::libcurl>
-    $<$<TARGET_EXISTS:jsoncpp>:jsoncpp>
+    jsoncpp
 )
 
 # Set output name

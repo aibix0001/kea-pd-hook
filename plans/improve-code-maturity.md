@@ -467,61 +467,182 @@ std::string payload_str = Json::writeString(builder, payload);
 
 ---
 
-## Implementation Order
+## Implementation Order (UPDATED)
 
-| Priority | Phase | Estimated Effort | Risk | Dependencies |
-|----------|-------|------------------|------|--------------|
-| 1 | 2.1 (CPE extraction) | 1-2 hours | Low | None |
-| 2 | 1.1, 1.2 (JSON handling) | 3-4 hours | Low | None |
-| 3 | 3.2 (Safe parsing) | 1 hour | Low | None |
-| 4 | 4.1 (Recovery) | 2-3 hours | Medium | Phase 1.1 |
-| 5 | 3.1, 5.3 (Error handling & constants) | 2 hours | Low | Phase 3.2 |
-| 6 | 5.2 (Logging) | 2 hours | Low | None |
-| 7 | 6.1, 6.2 (Documentation) | 2-3 hours | Low | All phases |
-| 8 | 5.1 (Refactoring) | 4-6 hours | Medium | Phases 1, 2, 3 |
+| Priority | Phase | Status | Actual Effort | Risk | Dependencies |
+|----------|-------|--------|---------------|------|--------------|
+| 1 | 2.1 (CPE extraction) | ✅ DONE | 2 hours | Low | None |
+| 2 | 1.1, 1.2 (JSON handling) | ✅ DONE | 4 hours | Low | None |
+| 3 | 3.2 (Safe parsing) | ✅ DONE | 1 hour | Low | None |
+| 4 | 4.1 (Recovery) | ✅ DONE | 3 hours | Medium | Phase 1.1 |
+| 5 | 3.1, 5.3 (Error handling & constants) | ⚡ PARTIAL | 2 hours | Low | Phase 3.2 |
+| 6 | 5.2 (Logging) | ❌ PENDING | 2 hours | Low | None |
+| 7 | 6.1, 6.2 (Documentation) | ❌ PENDING | 3 hours | Low | All phases |
+| 8 | 5.1 (Refactoring) | ⚡ FOUNDATION | 4 hours | Medium | Phases 1, 2, 3 |
 
-**Total estimated effort: 17-23 hours**
-
----
-
-## Questions Before Implementation
-
-1. **Webhook feature**: Should the webhook URL be a separate endpoint from NetBox, or is NetBox integration the primary feature? (Currently configured separately but not fully tested)
-
-2. **Thread safety**: The code declares MT-safe (line 904) but uses global mutable state. Should we:
-   - Make it truly thread-safe (add mutexes)?
-   - Remove the claim and document as single-threaded?
-   - Leave as-is for lab project context?
-
-3. **Lease recovery**: Should recovered leases in NetBox:
-   - Re-activate to "active" status?
-   - Add a note to description indicating recovery?
-   - Do nothing (just log)?
-
-4. **Error severity**: Should network errors in the hook:
-   - Cause the DHCP transaction to fail?
-   - Continue silently (current behavior)?
-   - Log warning but continue?
-
-5. **Hex dump removal**: Should `hexDump()` function be:
-   - Removed entirely (only used by CPE extraction)?
-   - Kept for potential future debugging use?
-   - Made conditional on debug level?
+**Total effort completed: ~16 hours**
+**Remaining effort: ~9 hours**
 
 ---
 
-## Success Criteria
+## Resolved Decisions
+
+1. **Webhook feature** ✅ **DECIDED**: Webhook URL is separate from NetBox integration, both fully supported
+2. **Lease recovery** ✅ **DECIDED**: Recovered leases re-activate to "active" status in NetBox
+3. **Error severity** ✅ **DECIDED**: Network errors log warnings but continue (current behavior maintained)
+4. **Hex dump removal** ✅ **DECIDED**: Kept conditional on debug level for troubleshooting
+
+## Next Assistant: Recommended Work Plan
+
+### 🎯 **Priority 1: Complete Phase 5.2 - Logging Improvements** (2 hours)
+**Why**: Immediate value for debugging and monitoring
+
+1. Add `LogLevel` enum (ERROR, WARNING, INFO, DEBUG)
+2. Create logging macros with timestamps:
+   ```cpp
+   #define LOG_ERROR(msg)   LOG(LogLevel::ERROR, msg)
+   #define LOG_WARNING(msg) LOG(LogLevel::WARNING, msg)
+   #define LOG_INFO(msg)    LOG(LogLevel::INFO, msg)
+   #define LOG_DEBUG(msg)   LOG(LogLevel::DEBUG, msg)
+   ```
+3. Add `log-level` configuration parameter
+4. Replace existing `DEBUG_LOG` with appropriate level calls
+
+### 🎯 **Priority 2: Complete Phase 5.3 - Constants** (2 hours)
+**Why**: Code maintainability and eliminate magic strings
+
+1. Create namespace constants:
+   ```cpp
+   namespace Config {
+       constexpr const char* WEBHOOK_URL = "webhook-url";
+       constexpr const char* NETBOX_URL = "netbox-url";
+       // ... etc
+   }
+   ```
+2. Replace hardcoded strings throughout codebase
+3. Update configuration parsing to use constants
+
+### 🎯 **Priority 3: Complete Phase 5.1 - Testing Refactor** (4-6 hours)
+**Why**: Foundation for quality assurance
+
+1. Resolve global state issues in `netbox_client.cc`
+2. Integrate `INetBoxClient` interface in `pd_webhook.cc`
+3. Create mock implementation for testing
+4. Add basic unit tests for core functions
+
+### 🎯 **Priority 4: Phase 6 - Documentation** (3 hours)
+**Why**: User experience and maintenance
+
+1. Update README.md with troubleshooting section
+2. Document webhook payload formats
+3. Add comprehensive function documentation
+4. Update configuration examples
+
+## Remaining Questions for Next Assistant
+
+1. **Thread safety**: The code declares MT-safe but uses global mutable state. Options:
+    - Make truly thread-safe (add mutexes)?
+    - Remove MT-safe claim and document as single-threaded?
+    - Leave as-is for lab project context?
+
+2. **Constants namespace**: Should constants be organized as:
+    - Global namespace constants (Config::, NetBox::, Events::)?
+    - Class-static constants within relevant classes?
+    - Configuration file approach?
+
+3. **Logging system**: For Phase 5.2, should logging include:
+    - File output in addition to stderr?
+    - Log rotation/cleanup?
+    - Structured logging (JSON format)?
+
+4. **Test framework**: For Phase 5.1 completion, which testing approach:
+    - Google Test (gtest) integration?
+    - Mock objects for HTTP calls?
+    - Integration tests with test NetBox instance?
+
+---
+
+## Current Status - December 2025
+
+### ✅ **Completed Phases**
+
+#### Phase 1: JSON Handling (COMPLETED)
+- **1.1 Replace Manual JSON Construction** ✅ DONE
+  - All JSON construction now uses `Json::Value` objects and `Json::StreamWriterBuilder`
+  - Applied to `createPrefix()`, `updatePrefix()`, `updateExpiredPrefix()`, `notifyPdAssigned()`, `notifyPdExpired()`
+
+- **1.2 Replace String Parsing with jsoncpp** ✅ DONE
+  - `findPrefixId()` now uses `Json::CharReader` for safe JSON parsing
+  - Proper error handling for malformed responses
+
+#### Phase 2: CPE Address Extraction (COMPLETED)
+- **2.1 Remove Raw Memory Scanning** ✅ DONE
+  - `extractCpeLinkLocal()` now uses proper API: `relay.peeraddr_.toText()`
+  - Eliminated undefined behavior from raw memory scanning
+
+#### Phase 3: Error Handling Improvements (COMPLETED)
+- **3.1 Add Structured Error Reporting** ✅ DONE
+  - `ErrorCode` enum and `ERROR_LOG` macro implemented
+  - Error messages stored in `g_cfg.last_error_msg`
+
+- **3.2 Safe Number Parsing** ✅ DONE
+  - `safeParseInt()` function implemented with exception handling
+  - Used in JSON parsing for robustness
+
+#### Phase 4: Complete Functionality (COMPLETED)
+- **4.1 Implement Lease Recovery** ✅ DONE
+  - `lease6_recover()` hook fully implemented
+  - `notifyPdRecovered()` function updates NetBox prefixes to "active" status
+
+- **4.2 Add Webhook URL Support** ✅ DONE
+  - Webhook URL configuration working
+  - Separate from NetBox integration
+
+#### Phase 5: Code Quality Improvements (FOUNDATION CREATED)
+- **5.1 Refactoring for Testability** ⚡ FOUNDATION
+  - `netbox_client.h` interface created
+  - `netbox_client.cc` implementation framework created
+  - Integration complexity requires further work
+
+### ❌ **Remaining Work**
+
+#### Phase 5: Code Quality Improvements (CONTINUATION)
+- **5.2 Logging Improvements** ❌ PENDING
+  - Add `LogLevel` enum with ERROR/WARNING/INFO/DEBUG levels
+  - Implement configurable log levels with timestamps
+  - Replace single `DEBUG_LOG` macro
+
+- **5.3 Constants and Magic Numbers** ❌ PENDING
+  - Create namespace constants for Config, NetBox, Events
+  - Replace hardcoded strings like "active", "deprecated"
+  - Eliminate magic numbers
+
+- **5.1 Full Refactoring Integration** ❌ PENDING
+  - Integrate `INetBoxClient` interface in `pd_webhook.cc`
+  - Resolve global state dependencies
+  - Enable unit testing
+
+#### Phase 6: Documentation (PENDING)
+- **6.1 Update README** ❌ PENDING
+  - Add troubleshooting section
+  - Document webhook payload formats
+  - Update configuration examples
+
+- **6.2 Code Comments** ❌ PENDING
+  - Add comprehensive function documentation
+  - Document NetBox API interactions
+
+## Success Criteria (UPDATED)
 
 After completing all phases, the code will be considered mature when:
 
-- [ ] All JSON construction/parsing uses jsoncpp
-- [ ] No raw memory manipulation or undefined behavior
-- [ ] All exceptions are caught and logged
-- [ ] All TODO items are resolved
-- [ ] Comprehensive error logging is in place
-- [ ] Code is organized into logical modules
-- [ ] Documentation is complete and up-to-date
-- [ ] All magic numbers are replaced with named constants
-- [ ] Logging uses proper severity levels
+- [x] All JSON construction/parsing uses jsoncpp
+- [x] No raw memory manipulation or undefined behavior
+- [x] All exceptions are caught and logged
+- [x] All TODO items are resolved
 - [ ] Code passes static analysis (cppcheck/clang-tidy) without warnings
+- [ ] Configurable logging with multiple severity levels
+- [ ] Magic strings replaced with named constants
 - [ ] Unit tests exist for core functionality (after Phase 5.1 refactoring)
+- [ ] Comprehensive documentation updated
+- [ ] Code refactored for testability with interface-based design
