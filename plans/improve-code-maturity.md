@@ -11,6 +11,11 @@ This plan addresses code maturity issues in `pd_webhook.cc` without focusing on 
 
 ---
 
+## Mandatory Rules - FOLLOW BEFORE STARTING ACTUAL WORK!
+
+- **Version control**: gitlab
+- **workflow rules**: follow skills for detailled instructions
+
 ## Phase 1: Fix JSON Handling (High Impact)
 
 ### 1.1 Replace Manual JSON Construction with jsoncpp
