@@ -16,30 +16,9 @@ namespace dhcp {
 }
 }
 
-// Forward declaration for error codes
-enum class ErrorCode {
-    NONE,
-    CURL_INIT_FAILED,
-    HTTP_REQUEST_FAILED,
-    JSON_PARSE_FAILED,
-    INVALID_RESPONSE
-};
-
-// External dependency on global config (will be refactored later)
-struct WebhookConfig {
-    std::string url;
-    long timeout_ms{2000};
-    bool enabled{false};
-    bool debug{false};
-    std::string netbox_url;
-    std::string netbox_token;
-    bool netbox_enabled{false};
-
-    // Error reporting
-    ErrorCode last_error{ErrorCode::NONE};
-    std::string last_error_msg;
-};
-
+// Forward declarations (defined in pd_webhook.cc)
+enum class ErrorCode;
+struct WebhookConfig;
 extern WebhookConfig g_cfg;
 
 // Error logging macro

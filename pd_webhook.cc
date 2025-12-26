@@ -44,6 +44,13 @@ enum class ErrorCode {
     INVALID_RESPONSE
 };
 
+enum class LogLevel {
+    ERROR,
+    WARNING,
+    INFO,
+    DEBUG
+};
+
 // Simple runtime configuration for this library.
 struct WebhookConfig {
     std::string url;
@@ -59,6 +66,9 @@ struct WebhookConfig {
     // Error reporting
     ErrorCode last_error{ErrorCode::NONE};
     std::string last_error_msg;
+
+    // Logging
+    LogLevel log_level{LogLevel::WARNING};
 };
 
 static WebhookConfig g_cfg;
