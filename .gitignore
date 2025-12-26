@@ -85,3 +85,4 @@ wheels/
 # our files/folders
 scratch/
 AGENTS.md
+.opencode/
