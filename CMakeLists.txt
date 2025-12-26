@@ -15,7 +15,7 @@ endif()
 include_directories(/usr/include/kea)
 
 # Create shared library
-add_library(pd_webhook SHARED pd_webhook.cc netbox_client.cc)
+add_library(pd_webhook SHARED pd_webhook.cc)
 
 # Link libraries
 target_link_libraries(pd_webhook
